@@ -1,0 +1,6 @@
+{
+  "name": "Pounamu Atelier — Jesse Mizzi & Authentic Greenstone",
+  "description": "Authentic New Zealand Pounamu taonga hand-carved by Jesse Mizzi. Verified Ngāi Tahu origin, custom carving atelier, bespoke configurator, and certified cultural provenance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

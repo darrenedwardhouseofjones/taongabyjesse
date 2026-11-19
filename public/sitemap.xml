@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=gallery</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=custom</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.85</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=story</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.75</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=provenance</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.75</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=policies</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-toki-arahura-01</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/product_toki_pounamu_1794468031889.jpg</image:loc>
+      <image:title>Arahura Kawakawa Toki Taonga</image:title>
+      <image:caption>Kawakawa Toki — Arahura River, West Coast (Te Tai o Poutini)</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-koru-cascade-02</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/product_koru_pounamu_1794468031802.jpg</image:loc>
+      <image:title>Cascade Inanga Spiral Koru</image:title>
+      <image:caption>Inanga Koru — Cascade Plateau, South Westland</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-pikorua-greenstone-03</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/product_toki_pounamu_1794468031889.jpg</image:loc>
+      <image:title>Kahurangi Double Twist Pikorua</image:title>
+      <image:caption>Kahurangi Pikorua (Twist) — Greenstone River (Te Awa Pounamu), Lake Wakatipu</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-roimata-inangahua-04</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/product_koru_pounamu_1794468031802.jpg</image:loc>
+      <image:title>Inangahua River Feather Roimata</image:title>
+      <image:caption>Kawakawa Roimata — Inangahua River, West Coast</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-manaia-guardian-05</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/product_toki_pounamu_1794468031889.jpg</image:loc>
+      <image:title>Arahura Guardian Manaia Pendant</image:title>
+      <image:caption>Kahurangi Manaia — Arahura River, West Coast</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=store&amp;product=prod-mere-heirloom-06</loc>
+    <lastmod>2026-11-19</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/custom_carving_workshop_1794468032796.jpg</image:loc>
+      <image:title>Ceremonial Kawakawa Mere Miniature</image:title>
+      <image:caption>Kawakawa Mere — Arahura River, West Coast</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=gallery&amp;piece=gal-tangiwai-roimata-01</loc>
+    <lastmod>2025-10-14</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/gallery_tangiwai_roimata_1794950532051.jpg</image:loc>
+      <image:title>Milford Sound Moss Tangiwai Roimata</image:title>
+      <image:caption>Tangiwai Roimata (2025) — Piopiotahi (Milford Sound), Fiordland</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=gallery&amp;piece=gal-inanga-pikorua-02</loc>
+    <lastmod>2025-08-22</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/gallery_inanga_pikorua_1794950532518.jpg</image:loc>
+      <image:title>Moonlight Inanga Interwoven Pikorua</image:title>
+      <image:caption>Inanga Pikorua (Twist) (2025) — Cascade Plateau, South Westland</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/?tab=gallery&amp;piece=gal-kawakawa-manaia-03</loc>
+    <lastmod>2026-03-11</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+    <image:image>
+      <image:loc>https://ais-dev-mh2cydp5dn2mn776zgyqed-40001700127.asia-east1.run.app/src/assets/images/gallery_manaia_paua_1794950533516.jpg</image:loc>
+      <image:title>Kawakawa Guardian Manaia with Pāua Eye</image:title>
+      <image:caption>Kawakawa Manaia (2026) — Arahura River, West Coast</image:caption>
+    </image:image>
+  </url>
+</urlset>
