@@ -39,16 +39,29 @@ function resolveBaseUrl(settings: SiteSettings): string {
   ).replace(/\/+$/, '');
 }
 
+function sanitizeTrackingHttpUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {
+    // Ignore malformed tracking URLs
+  }
+  return null;
+}
+
 function buildCourierTrackingUrl(order: Order, couriers: Courier[]): string | null {
   if (!order.trackingNumber) return null;
   const matched = couriers.find(
     (c) => c.name.toLowerCase() === order.courierName.toLowerCase()
   );
   if (matched?.trackingUrlTemplate) {
-    return matched.trackingUrlTemplate.replace(
+    const templated = matched.trackingUrlTemplate.replace(
       '{TRACKING}',
       encodeURIComponent(order.trackingNumber)
     );
+    return sanitizeTrackingHttpUrl(templated);
   }
   if (order.courierName.toLowerCase().includes('aramex')) {
     return `https://www.aramex.co.nz/tools/track?tracking_number=${encodeURIComponent(

@@ -106,14 +106,17 @@ npm run sitemap
 npm run sitemap:watch
 ```
 
-## Production Deployment Checklist
+## Production Deployment Checklist (Dokploy / Docker)
 
-1. Configure runtime environment variables (`APP_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and optionally `RESEND_API_KEY` or `SMTP_*`).
-2. Run `npm run build` to generate `public/sitemap.xml` and compile the frontend into `dist/`.
-3. Run `NODE_ENV=production npm run start` (`node server.ts` on Node 22+, serving `dist/`, `public/`, `/src/assets`, and SQLite persistence in `data/pounamu.db`).
-4. Sign in at the Member & Studio login modal using **`jesse`** (or `ADMIN_EMAIL`) and change the initial password in **Dashboard → Profile Settings → Update Password** if using the fallback default.
+1. **Runtime & Builder:** The repository includes `nixpacks.toml` (`NIXPACKS_SPA_CADDY=false`, Node.js 22, native SQLite build tools, and full-stack Express startup) as well as a `Dockerfile` (`node:22-bookworm-slim`) and `.node-version` (`22`). Either Dokploy **Nixpacks** or **Dockerfile** build mode works out of the box—ensure Dokploy exposes port **`3000`**.
+2. **Persistent Volume (Important for SQLite):** Mount a persistent volume at **`/app/data`** (or set `DATA_DIR` / `SQLITE_DB_PATH`) in Dokploy **Mounts** so `pounamu.db` persists across container redeployments.
+3. **Environment Variables:** Configure `APP_URL`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and optionally `RESEND_API_KEY` or `SMTP_*`.
+4. **Build & Start:**
+   - **Nixpacks:** Runs `npm run build` and starts Express via `./node_modules/.bin/tsx server.ts` (`NODE_ENV=production`).
+   - **Dockerfile / VPS:** Runs `npm run build` and `NODE_ENV=production npm run start` (`node server.ts` on Node 22+, serving `dist/`, `public/`, `/src/assets`, and SQLite persistence in `data/pounamu.db`).
+5. Sign in at the Member & Studio login modal using **`jesse`** (or `ADMIN_EMAIL`) and update the initial password in **Dashboard → Profile Settings → Update Password** if using the fallback default.
 
 ## Database & Persistence
 
-- Application state (users, products, gallery items, legal/privacy policies, SEO per-page overrides, couriers & shipping rates, orders, custom commissions, gift cards, discounts, and email logs) is stored in **SQLite** (`data/pounamu.db`) in WAL mode.
+- Application state (users, products, gallery items, legal/privacy policies, SEO per-page overrides, couriers & shipping rates, orders, custom commissions, gift cards, discounts, and email logs) is stored in **SQLite** (`data/pounamu.db`, or `$DATA_DIR/pounamu.db`) in WAL mode.
 - Runtime schema defaults live in `src/utils/defaults.ts`; on a fresh empty database, SQLite automatically seeds default `site_settings`, `custom_pricing`, `NZ Post` courier rates, and Jesse's admin account so the app is ready immediately upon deployment.

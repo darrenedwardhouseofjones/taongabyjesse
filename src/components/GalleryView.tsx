@@ -433,6 +433,8 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                     <img
                       src={entry.image}
                       alt={entry.title}
+                      loading="lazy"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                       onClick={() => setSelectedEntry(entry)}
                       onError={() =>
@@ -557,6 +559,8 @@ export const GalleryView: React.FC<GalleryViewProps> = ({
                     <img
                       src={selectedEntry.image}
                       alt={selectedEntry.title}
+                      loading="lazy"
+                      decoding="async"
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />

@@ -1,0 +1,15 @@
+[variables]
+NIXPACKS_SPA_CADDY = "false"
+NIXPACKS_NODE_VERSION = "22"
+
+[phases.setup]
+nixPkgs = ["nodejs_22", "python3", "gcc", "gnumake"]
+
+[phases.install]
+cmds = ["npm install --include=dev --no-audit --no-fund"]
+
+[phases.build]
+cmds = ["npm run build && rm -f data/pounamu.db* && mkdir -p data"]
+
+[start]
+cmd = "NODE_ENV=production ./node_modules/.bin/tsx server.ts"

@@ -49,6 +49,7 @@ import { downloadOrdersCsv } from '../utils/ordersCsv';
 import { apiFetch } from '../utils/api';
 import { AdminDashboard } from './AdminDashboard';
 import { buildCourierTrackingUrl, OrderLookupView } from './OrderLookupView';
+import { sanitizeSafeHref } from '../utils/url';
 import type { DashboardSection } from './Navbar';
 
 interface DashboardViewProps {
@@ -976,17 +977,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                   </button>
                                 </div>
                               </div>
-                              {trackUrl && (
-                                <a
-                                  href={trackUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="px-3.5 py-2 bg-[#1B382B] hover:bg-[#12241B] text-white font-semibold rounded-xl inline-flex items-center gap-1.5 shadow-2xs"
-                                >
-                                  <span>Track Parcel</span>
-                                  <ExternalLink className="w-3.5 h-3.5 text-[#7FA892]" />
-                                </a>
-                              )}
+                              {(() => {
+                                const safeTrackUrl = trackUrl ? sanitizeSafeHref(trackUrl) : null;
+                                return safeTrackUrl ? (
+                                  <a
+                                    href={safeTrackUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-3.5 py-2 bg-[#1B382B] hover:bg-[#12241B] text-white font-semibold rounded-xl inline-flex items-center gap-1.5 shadow-2xs"
+                                  >
+                                    <span>Track Parcel</span>
+                                    <ExternalLink className="w-3.5 h-3.5 text-[#7FA892]" />
+                                  </a>
+                                ) : null;
+                              })()}
                             </div>
                           );
                         })() : order.status === 'DELIVERED' ? (
@@ -1088,7 +1092,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           </div>
 
                           {order.trackingNumber && (() => {
-                            const trackUrl = buildCourierTrackingUrl(order, couriers);
+                            const rawTrackUrl = buildCourierTrackingUrl(order, couriers);
+                            const trackUrl = rawTrackUrl ? sanitizeSafeHref(rawTrackUrl) : null;
                             return trackUrl ? (
                               <a
                                 href={trackUrl}

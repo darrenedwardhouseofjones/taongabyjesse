@@ -696,11 +696,16 @@ export default function App() {
     text: string,
     sender: 'customer' | 'carver'
   ): Promise<void> => {
+    const targetCommission = commissions.find((c) => c.id === commissionId);
     const res = await apiFetch<{ commission: CustomCommission }>(
       `/api/commissions/${commissionId}/messages`,
       {
         method: 'POST',
-        body: JSON.stringify({ text, sender }),
+        body: JSON.stringify({
+          text,
+          sender,
+          customerEmail: targetCommission?.customerEmail,
+        }),
       }
     );
     setCommissions((prev) =>

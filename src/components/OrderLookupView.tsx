@@ -13,6 +13,7 @@ import { Courier, Order, SiteSettings } from '../types';
 import { formatNZD } from '../utils/pricing';
 import { generateOrderReceiptPdf } from '../utils/receiptPdf';
 import { apiFetch } from '../utils/api';
+import { sanitizeSafeHref } from '../utils/url';
 
 interface OrderLookupViewProps {
   orders: Order[];
@@ -37,10 +38,12 @@ export function buildCourierTrackingUrl(
     (c) => c.name.toLowerCase() === order.courierName.toLowerCase()
   );
   if (matchedCourier?.trackingUrlTemplate) {
-    return matchedCourier.trackingUrlTemplate.replace(
+    const rawUrl = matchedCourier.trackingUrlTemplate.replace(
       '{TRACKING}',
       encodeURIComponent(order.trackingNumber)
     );
+    const safeUrl = sanitizeSafeHref(rawUrl);
+    return safeUrl && /^https?:/i.test(safeUrl) ? safeUrl : null;
   }
   if (order.courierName.toLowerCase().includes('aramex')) {
     return `https://www.aramex.co.nz/tools/track?tracking_number=${encodeURIComponent(order.trackingNumber)}`;
@@ -55,6 +58,8 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
 }) => {
   const activeSettings = settings;
   const [query, setQuery] = useState('');
+  const [verifyEmail, setVerifyEmail] = useState('');
+  const [verifyError, setVerifyError] = useState('');
   const [matchedOrder, setMatchedOrder] = useState<Order | null>(null);
   const [searched, setSearched] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
@@ -65,6 +70,7 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     const cleanQuery = query.trim().toUpperCase();
     if (!cleanQuery) return;
     setIsSearching(true);
+    setVerifyError('');
     const localMatch = orders.find(
       (o) =>
         o.orderNumber.toUpperCase() === cleanQuery ||
@@ -79,8 +85,11 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     }
 
     try {
+      const emailParam = verifyEmail.trim()
+        ? `&email=${encodeURIComponent(verifyEmail.trim())}`
+        : '';
       const res = await apiFetch<{ order: Order | null }>(
-        `/api/orders/lookup?q=${encodeURIComponent(query.trim())}`
+        `/api/orders/lookup?q=${encodeURIComponent(query.trim())}${emailParam}`
       );
       setMatchedOrder(res.order);
     } catch {
@@ -89,6 +98,29 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     setSearched(true);
     setPdfDownloaded(false);
     setIsSearching(false);
+  };
+
+  const handleVerifyReceiptEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!matchedOrder || !verifyEmail.trim()) return;
+    setIsSearching(true);
+    setVerifyError('');
+    try {
+      const res = await apiFetch<{ order: Order | null }>(
+        `/api/orders/lookup?q=${encodeURIComponent(matchedOrder.orderNumber)}&email=${encodeURIComponent(
+          verifyEmail.trim()
+        )}`
+      );
+      if (res.order && !res.order.customerEmail.includes('***')) {
+        setMatchedOrder(res.order);
+      } else {
+        setVerifyError('Email did not match this order.');
+      }
+    } catch {
+      setVerifyError('Unable to verify email right now.');
+    } finally {
+      setIsSearching(false);
+    }
   };
 
   const handleDownloadPdf = () => {
@@ -101,6 +133,7 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
   const isCompletedPurchase = matchedOrder
     ? COMPLETED_STATUSES.includes(matchedOrder.status)
     : false;
+  const isRedactedOrder = Boolean(matchedOrder && matchedOrder.customerEmail.includes('***'));
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-12 space-y-10">
@@ -112,7 +145,7 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
           Order Lookup & Tracking
         </h1>
         <p className="text-xs sm:text-sm text-[#526058] max-w-lg mx-auto">
-          Enter your order reference number or checkout email address to view courier tracking details, taonga provenance, and your digital tax receipt.
+          Enter your exact order reference number to track your parcel and taonga provenance, or sign in to search by checkout email.
         </p>
 
         <form onSubmit={handleSearch} className="flex gap-2 max-w-md mx-auto pt-2">
@@ -120,7 +153,7 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Order # (e.g. PA-2026-...) or Email..."
+            placeholder="Order # (e.g. PA-2026-...)"
             className="flex-1 p-2.5 border border-[#E8E2D6] rounded-xl text-xs font-mono uppercase focus:outline-none focus:border-[#1B382B]"
           />
           <button
@@ -212,7 +245,8 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                   matchedOrder.paymentMethod !== 'CASH_ON_PICKUP' &&
                   matchedOrder.trackingNumber &&
                   (() => {
-                    const trackUrl = buildCourierTrackingUrl(matchedOrder, couriers);
+                    const rawTrackUrl = buildCourierTrackingUrl(matchedOrder, couriers);
+                    const trackUrl = rawTrackUrl ? sanitizeSafeHref(rawTrackUrl) : null;
                     return trackUrl ? (
                       <a
                         href={trackUrl}
@@ -319,7 +353,11 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                       <Printer className="w-3.5 h-3.5" />
                       <span>Print</span>
                     </button>
-                    {isCompletedPurchase ? (
+                    {isRedactedOrder ? (
+                      <span className="text-[11px] text-[#526058] italic px-2">
+                        Verify checkout email below to download tax receipt.
+                      </span>
+                    ) : isCompletedPurchase ? (
                       <button
                         type="button"
                         onClick={handleDownloadPdf}
@@ -345,6 +383,39 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                   </div>
                 </div>
 
+                {isRedactedOrder && (
+                  <form
+                    onSubmit={handleVerifyReceiptEmail}
+                    className="p-3.5 rounded-xl bg-white border border-[#E8E2D6] flex flex-wrap items-center gap-2 text-xs"
+                  >
+                    <span className="text-[#526058] font-medium">
+                      Delivery street address and full tax receipt are protected. Enter your checkout email ({matchedOrder.customerEmail}) to unlock:
+                    </span>
+                    <div className="flex gap-2 flex-1 min-w-[220px]">
+                      <input
+                        type="email"
+                        required
+                        value={verifyEmail}
+                        onChange={(e) => setVerifyEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        className="flex-1 px-2.5 py-1.5 border border-[#E8E2D6] rounded-lg text-xs focus:outline-none focus:border-[#1B382B]"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isSearching}
+                        className="px-3 py-1.5 bg-[#1B382B] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50"
+                      >
+                        Unlock Receipt
+                      </button>
+                    </div>
+                    {verifyError && (
+                      <span className="w-full text-[11px] text-[#A63A2A] font-medium">
+                        {verifyError}
+                      </span>
+                    )}
+                  </form>
+                )}
+
                 {/* Receipt Summary Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                   <div className="bg-white rounded-xl border border-[#E8E2D6] p-3.5 space-y-1">
@@ -366,13 +437,19 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                       </div>
                     ) : (
                       <div className="text-[#526058] pt-1">
-                        {matchedOrder.shippingAddress.line1}
-                        {matchedOrder.shippingAddress.line2
-                          ? `, ${matchedOrder.shippingAddress.line2}`
-                          : ''}
-                        <br />
+                        {matchedOrder.shippingAddress.line1 ? (
+                          <>
+                            {matchedOrder.shippingAddress.line1}
+                            {matchedOrder.shippingAddress.line2
+                              ? `, ${matchedOrder.shippingAddress.line2}`
+                              : ''}
+                            <br />
+                          </>
+                        ) : null}
                         {matchedOrder.shippingAddress.city}, {matchedOrder.shippingAddress.region}{' '}
-                        {matchedOrder.shippingAddress.postcode}, {matchedOrder.shippingAddress.country}
+                        {matchedOrder.shippingAddress.postcode}
+                        {matchedOrder.shippingAddress.postcode ? ', ' : ' '}
+                        {matchedOrder.shippingAddress.country}
                       </div>
                     )}
                     {matchedOrder.orderNotes && (

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { GalleryItem, PageSeoMetadata, Product, SiteSettings } from '../types';
 import { apiFetch } from '../utils/api';
+import { sanitizeSafeHref } from '../utils/url';
 
 interface ParsedSitemapEntry {
   loc: string;
@@ -623,16 +624,21 @@ export const SeoAuditSection: React.FC<SeoAuditSectionProps> = ({
                           </div>
                           <div className="flex items-center gap-1 font-mono text-[10px] text-[#526058] break-all">
                             <span>{row.pageKey}</span>
-                            <a
-                              href={row.pageKey}
-                              target="_blank"
-                              rel="noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              title="Open indexed page"
-                              className="text-[#2D5A46] hover:text-[#1B382B] shrink-0"
-                            >
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
+                            {(() => {
+                              const safePageHref = sanitizeSafeHref(row.pageKey);
+                              return safePageHref ? (
+                                <a
+                                  href={safePageHref}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  title="Open indexed page"
+                                  className="text-[#2D5A46] hover:text-[#1B382B] shrink-0"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              ) : null;
+                            })()}
                           </div>
                           {row.priority && (
                             <div className="text-[10px] text-[#7D8B82] font-mono">

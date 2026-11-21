@@ -33,12 +33,17 @@ import type {
   WishlistItem,
 } from '../src/types/index.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+const DATA_DIR = process.env.DATA_DIR?.trim()
+  ? path.resolve(process.env.DATA_DIR.trim())
+  : path.resolve(process.cwd(), 'data');
+const DB_PATH = process.env.SQLITE_DB_PATH?.trim()
+  ? path.resolve(process.env.SQLITE_DB_PATH.trim())
+  : path.join(DATA_DIR, 'pounamu.db');
+const dbDir = path.dirname(DB_PATH);
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'pounamu.db');
 const db = new Database(DB_PATH);
 
 // Enable WAL mode & foreign keys as specified in architecture
@@ -842,6 +847,17 @@ export function findOrderByQuery(query: string): Order | null {
       'SELECT data_json FROM orders WHERE LOWER(order_number) = ? OR LOWER(customer_email) = ? ORDER BY created_at DESC LIMIT 1'
     )
     .get(clean, clean) as { data_json: string } | undefined;
+  return row ? (JSON.parse(row.data_json) as Order) : null;
+}
+
+export function findOrderByOrderNumber(orderNumber: string): Order | null {
+  const clean = orderNumber.trim().toLowerCase();
+  if (!clean) return null;
+  const row = db
+    .prepare(
+      'SELECT data_json FROM orders WHERE LOWER(order_number) = ? ORDER BY created_at DESC LIMIT 1'
+    )
+    .get(clean) as { data_json: string } | undefined;
   return row ? (JSON.parse(row.data_json) as Order) : null;
 }
 

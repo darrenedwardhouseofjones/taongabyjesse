@@ -148,11 +148,21 @@ const StripePaymentForm: React.FC<StripePaymentFormProps> = ({
       if (finalRes.status === 'PENDING') {
         for (let i = 0; i < 4; i++) {
           await new Promise((r) => setTimeout(r, 900));
-          const poll = await apiFetch<{ status: Order['status']; order: Order }>(
-            `/api/orders/${order.id}/status`
-          );
+          const poll = await apiFetch<{
+            status: Order['status'];
+            paymentStatus?: Order['paymentStatus'];
+            order?: Order;
+          }>(`/api/orders/${order.id}/status`);
           if (poll.status !== 'PENDING') {
-            finalRes = { ...finalRes, status: poll.status, order: poll.order };
+            finalRes = {
+              ...finalRes,
+              status: poll.status,
+              order: poll.order || {
+                ...finalRes.order,
+                status: poll.status,
+                paymentStatus: poll.paymentStatus ?? finalRes.order.paymentStatus,
+              },
+            };
             break;
           }
         }

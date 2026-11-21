@@ -414,6 +414,8 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                     <img
                       src={product.images[0]}
                       alt={product.title}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover group-hover:scale-104 transition-transform duration-700"
                       referrerPolicy="no-referrer"
                     />
@@ -615,6 +617,8 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                   <img
                     src={activeProductModal.images[0]}
                     alt={activeProductModal.title}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-cover"
                     referrerPolicy="no-referrer"
                   />

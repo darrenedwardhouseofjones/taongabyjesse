@@ -29,6 +29,7 @@ import {
   deleteProduct,
   deleteSession,
   findCommissionByRefAndEmail,
+  findOrderByOrderNumber,
   findOrderByQuery,
   findUserForLogin,
   getAdminPaymentSettingsView,
@@ -171,9 +172,96 @@ function setSessionCookie(res: express.Response, req: express.Request, token: st
     httpOnly: true,
     sameSite: isSecure ? 'none' : 'lax',
     secure: isSecure,
+    ...(isSecure ? { partitioned: true } : {}),
     maxAge: 14 * 24 * 60 * 60 * 1000,
     path: '/',
-  });
+  } as express.CookieOptions);
+}
+
+function clearSessionCookie(res: express.Response, req: express.Request) {
+  const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: isSecure ? 'none' : 'lax',
+    secure: isSecure,
+    ...(isSecure ? { partitioned: true } : {}),
+    path: '/',
+  } as express.CookieOptions);
+}
+
+function getVisibleProductsForUser(user: UserProfile | null): Product[] {
+  const all = getAllProducts();
+  if (user?.role === 'ADMIN') return all;
+  return all
+    .filter((p) => p.published)
+    .map((p) => ({ ...p, costPriceCents: 0 }));
+}
+
+function maskEmail(email: string): string {
+  const parts = email.split('@');
+  if (parts.length !== 2) return '***';
+  const [local, domain] = parts;
+  const visible = local.length <= 1 ? '*' : `${local[0]}***`;
+  return `${visible}@${domain}`;
+}
+
+function redactOrderForGuest(order: Order): Order {
+  return {
+    ...order,
+    customerEmail: maskEmail(order.customerEmail),
+    customerPhone: '',
+    shippingAddress: {
+      ...order.shippingAddress,
+      line1: '',
+      line2: '',
+      postcode: '',
+    },
+    stripePaymentIntentId: '',
+    stripeFeeCents: 0,
+    netCents: 0,
+    pickupNotes: undefined,
+    orderNotes: undefined,
+  };
+}
+
+const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+const rateLimitSweepTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitBuckets.entries()) {
+    if (entry.resetAt <= now) {
+      rateLimitBuckets.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+rateLimitSweepTimer.unref();
+
+function getClientIp(req: express.Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim()) {
+    return xff.split(',')[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function createRateLimiter(opts: { windowMs: number; max: number; keyPrefix: string }) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    const key = `${opts.keyPrefix}:${getClientIp(req)}`;
+    const entry = rateLimitBuckets.get(key);
+    if (!entry || entry.resetAt <= now) {
+      rateLimitBuckets.set(key, { count: 1, resetAt: now + opts.windowMs });
+      return next();
+    }
+    if (entry.count >= opts.max) {
+      const retryAfterSec = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      return res.status(429).json({
+        error: 'Too many requests. Please wait a moment before trying again.',
+      });
+    }
+    entry.count += 1;
+    return next();
+  };
 }
 
 function escapeHtmlAttr(val: string): string {
@@ -283,7 +371,19 @@ function refreshPublicSitemap() {
 async function startServer() {
   const app = express();
   app.set('trust proxy', true);
+  app.disable('x-powered-by');
   startSitemapScheduler({ unrefTimer: true });
+
+  // Security headers (preserve iFrame embedding compatibility for AI Studio preview)
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+  });
 
   // --- Stripe Webhook (MUST mount BEFORE express.json() so req.body stays raw Buffer) ---
   app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -398,11 +498,45 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
+  // CSRF protection for cookie-authenticated mutations (Stripe webhook mounts above)
+  const csrfUnsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  app.use('/api', (req, res, next) => {
+    if (!csrfUnsafeMethods.has(req.method)) return next();
+    const cookies = parseCookies(req.headers.cookie);
+    if (!cookies[SESSION_COOKIE_NAME]) return next();
+    if (req.headers.authorization?.startsWith('Bearer ')) return next();
+    if (req.headers['x-requested-with'] === 'XMLHttpRequest') return next();
+
+    const expectedHost = (req.get('x-forwarded-host') || req.get('host') || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    const originHeader = req.get('origin') || req.get('referer');
+    if (originHeader && expectedHost) {
+      try {
+        const parsedOrigin = new URL(originHeader);
+        if (parsedOrigin.host.toLowerCase() === expectedHost) {
+          return next();
+        }
+      } catch {
+        // Malformed origin rejected below
+      }
+    }
+    return res
+      .status(403)
+      .json({ error: 'Cross-site request rejected (missing origin or X-Requested-With).' });
+  });
+
+  const authRateLimiter = createRateLimiter({ windowMs: 60_000, max: 15, keyPrefix: 'auth' });
+  const lookupRateLimiter = createRateLimiter({ windowMs: 60_000, max: 30, keyPrefix: 'lookup' });
+  const giftCardRateLimiter = createRateLimiter({ windowMs: 60_000, max: 20, keyPrefix: 'giftcard' });
+  const commissionRateLimiter = createRateLimiter({ windowMs: 60_000, max: 10, keyPrefix: 'commission' });
+
   // --- Bootstrap Endpoint ---
   app.get('/api/bootstrap', (req, res) => {
     const user = getAuthenticatedUser(req);
     const settings = getSiteSettings();
-    const products = getAllProducts();
+    const products = getVisibleProductsForUser(user);
     const galleryItems = getGalleryItems();
     const couriers = getCouriers();
     const rates = getCourierRates();
@@ -514,7 +648,7 @@ async function startServer() {
     res.json({ user });
   });
 
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', authRateLimiter, (req, res) => {
     const settings = getSiteSettings();
     if (!settings.allowEmailRegistration) {
       return res.status(403).json({
@@ -535,8 +669,8 @@ async function startServer() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       return res.status(400).json({ error: 'Please enter a valid email address.' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
     }
 
     const existing = getUserByEmail(email);
@@ -562,7 +696,7 @@ async function startServer() {
     res.status(201).json({ user, token, orders, commissions, wishlist, giftCards });
   });
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', authRateLimiter, (req, res) => {
     const { email, username, password } = req.body as {
       email?: string;
       username?: string;
@@ -600,7 +734,7 @@ async function startServer() {
     res.json({ user, token, orders, commissions, wishlist, giftCards });
   });
 
-  app.post('/api/auth/google', async (req, res) => {
+  app.post('/api/auth/google', authRateLimiter, async (req, res) => {
     const settings = getSiteSettings();
     if (!settings.allowGmailOAuth) {
       return res.status(403).json({
@@ -693,7 +827,7 @@ async function startServer() {
     if (token) {
       deleteSession(token);
     }
-    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+    clearSessionCookie(res, req);
     res.json({ ok: true });
   });
 
@@ -1250,7 +1384,7 @@ async function startServer() {
 
     res.status(201).json({
       order: confirmed.order,
-      products: getAllProducts(),
+      products: getVisibleProductsForUser(user),
       emailLog: emailResult?.emailLog || null,
     });
   });
@@ -1453,13 +1587,14 @@ async function startServer() {
 
     res.status(201).json({
       order: confirmed.order,
-      products: getAllProducts(),
+      products: getVisibleProductsForUser(user),
       emailLog: emailResult?.emailLog || null,
       remainingGiftCardBalanceCents: confirmed.remainingGiftCardBalanceCents,
     });
   });
 
   app.post('/api/checkout/confirm-status', async (req, res) => {
+    const user = getAuthenticatedUser(req);
     const { orderId, paymentIntentId } = req.body as {
       orderId?: string;
       paymentIntentId?: string;
@@ -1472,8 +1607,15 @@ async function startServer() {
     if (!order) {
       return res.status(404).json({ error: 'Order not found.' });
     }
+    if (order.stripePaymentIntentId && order.stripePaymentIntentId !== paymentIntentId) {
+      return res.status(403).json({ error: 'PaymentIntent does not belong to this order.' });
+    }
     if (order.status !== 'PENDING') {
-      return res.json({ status: order.status, order, products: getAllProducts() });
+      return res.json({
+        status: order.status,
+        order,
+        products: getVisibleProductsForUser(user),
+      });
     }
 
     const creds = getResolvedStripeCredentials();
@@ -1510,12 +1652,17 @@ async function startServer() {
         return res.json({
           status: result.order?.status || 'PAID',
           order: result.order || order,
-          products: getAllProducts(),
+          products: getVisibleProductsForUser(user),
           emailLog: emailResult?.emailLog || null,
         });
       }
 
-      res.json({ status: order.status, stripeStatus: pi.status, order, products: getAllProducts() });
+      res.json({
+        status: order.status,
+        stripeStatus: pi.status,
+        order,
+        products: getVisibleProductsForUser(user),
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to verify Stripe payment status.';
       res.status(400).json({ error: message });
@@ -1601,18 +1748,78 @@ async function startServer() {
     }
     res.json({ emailLogs: getAllOrderEmailLogs() });
   });
-  app.get('/api/orders/lookup', (req, res) => {
-    const query = typeof req.query.q === 'string' ? req.query.q : '';
-    const order = findOrderByQuery(query);
-    res.json({ order });
+  app.get('/api/orders/lookup', lookupRateLimiter, (req, res) => {
+    const user = getAuthenticatedUser(req);
+    const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const verifyEmail =
+      typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+    if (!query) {
+      return res.json({ order: null });
+    }
+
+    let order: Order | null = null;
+    if (user?.role === 'ADMIN') {
+      order = findOrderByQuery(query);
+    } else if (user) {
+      const exactMatch = findOrderByOrderNumber(query);
+      if (exactMatch) {
+        order = exactMatch;
+      } else {
+        const byEmailOrOrder = findOrderByQuery(query);
+        if (
+          byEmailOrOrder &&
+          (byEmailOrOrder.userId === user.id ||
+            byEmailOrOrder.customerEmail.toLowerCase() === user.email.toLowerCase())
+        ) {
+          order = byEmailOrOrder;
+        }
+      }
+    } else {
+      order = findOrderByOrderNumber(query);
+    }
+
+    if (!order) {
+      return res.json({ order: null });
+    }
+
+    const isOwner =
+      user?.role === 'ADMIN' ||
+      (user &&
+        (order.userId === user.id ||
+          order.customerEmail.toLowerCase() === user.email.toLowerCase())) ||
+      Boolean(verifyEmail && verifyEmail === order.customerEmail.toLowerCase());
+
+    res.json({ order: isOwner ? order : redactOrderForGuest(order) });
   });
 
   app.get('/api/orders/:id/status', (req, res) => {
+    const user = getAuthenticatedUser(req);
     const order = getOrderById(req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found.' });
     }
-    res.json({ status: order.status, orderNumber: order.orderNumber, order });
+    const verifyEmail =
+      typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+    const isAuthorized =
+      user?.role === 'ADMIN' ||
+      (user &&
+        (order.userId === user.id ||
+          order.customerEmail.toLowerCase() === user.email.toLowerCase())) ||
+      Boolean(verifyEmail && verifyEmail === order.customerEmail.toLowerCase());
+
+    if (!isAuthorized) {
+      return res.json({
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        orderNumber: order.orderNumber,
+      });
+    }
+    res.json({
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      orderNumber: order.orderNumber,
+      order,
+    });
   });
 
   app.post('/api/orders', (req, res) => {
@@ -2145,7 +2352,7 @@ async function startServer() {
   });
 
   // --- Digital Gift Card Routes ---
-  app.get('/api/gift-cards/validate', (req, res) => {
+  app.get('/api/gift-cards/validate', giftCardRateLimiter, (req, res) => {
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     const result = validateGiftCardForCheckout(code);
     res.json(result);
@@ -2495,14 +2702,14 @@ async function startServer() {
   });
 
   // --- Custom Commissions Routes ---
-  app.get('/api/commissions/lookup', (req, res) => {
+  app.get('/api/commissions/lookup', lookupRateLimiter, (req, res) => {
     const ref = typeof req.query.ref === 'string' ? req.query.ref : '';
     const email = typeof req.query.email === 'string' ? req.query.email : '';
     const commission = findCommissionByRefAndEmail(ref, email);
     res.json({ commission });
   });
 
-  app.post('/api/commissions', (req, res) => {
+  app.post('/api/commissions', commissionRateLimiter, (req, res) => {
     const user = getAuthenticatedUser(req);
     const body = req.body as CustomCommission & {
       mode?: 'configurator' | 'direct-quote';
@@ -2559,13 +2766,28 @@ async function startServer() {
 
   app.post('/api/commissions/:id/messages', (req, res) => {
     const user = getAuthenticatedUser(req);
-    const { text, sender } = req.body as { text?: string; sender?: 'customer' | 'carver' };
+    const { text, sender, customerEmail, email } = req.body as {
+      text?: string;
+      sender?: 'customer' | 'carver';
+      customerEmail?: string;
+      email?: string;
+    };
     if (!text?.trim()) {
       return res.status(400).json({ error: 'Message text is required.' });
     }
     const target = getCommissionById(req.params.id);
     if (!target) {
       return res.status(404).json({ error: 'Commission not found.' });
+    }
+    const bodyEmail = (customerEmail ?? email ?? '').trim().toLowerCase();
+    const isOwner =
+      user?.role === 'ADMIN' ||
+      (user && user.email.toLowerCase() === target.customerEmail.toLowerCase()) ||
+      Boolean(bodyEmail && bodyEmail === target.customerEmail.toLowerCase());
+    if (!isOwner) {
+      return res
+        .status(403)
+        .json({ error: 'Permission required to post messages on this commission.' });
     }
     const resolvedSender = user?.role === 'ADMIN' && sender === 'carver' ? 'carver' : 'customer';
     const updated: CustomCommission = {
