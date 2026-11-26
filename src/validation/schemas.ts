@@ -789,6 +789,48 @@ export const customPricingConfigSchema = z.object({
   bindingOptions: z.array(z.string().trim().min(1).max(160)),
 });
 
+export const SOCIAL_PLATFORM_VALUES = [
+  'FACEBOOK',
+  'INSTAGRAM',
+  'YOUTUBE',
+  'RUMBLE',
+  'X',
+  'TIKTOK',
+  'PINTEREST',
+  'LINKEDIN',
+  'THREADS',
+  'DISCORD',
+  'WHATSAPP',
+  'WEBSITE',
+] as const;
+
+export const socialPlatformSchema = z.enum(SOCIAL_PLATFORM_VALUES);
+
+export const safeSocialHttpUrlSchema = z
+  .string()
+  .trim()
+  .min(1, 'Please enter a social media URL.')
+  .max(2048, 'Social URL is too long.')
+  .refine(
+    (val) => {
+      if (!/^https?:\/\//i.test(val)) return false;
+      try {
+        const parsed = new URL(val);
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname);
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Please enter a valid web URL starting with https:// or http://.' }
+  );
+
+export const socialLinkSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  platform: socialPlatformSchema,
+  url: safeSocialHttpUrlSchema,
+  label: z.string().trim().max(80).optional(),
+});
+
 export const siteSettingsUpdateSchema = z
   .object({
     siteName: z.string().trim().min(1, 'Studio name is required.').max(120),
@@ -837,6 +879,7 @@ export const siteSettingsUpdateSchema = z
     paypalClientId: z.string().trim().max(240).optional(),
     cashOnPickupEnabled: z.boolean().optional(),
     cashOnPickupInstructions: z.string().trim().max(600).optional(),
+    socialLinks: z.array(socialLinkSchema).max(24, 'Maximum 24 social links allowed.').optional(),
   })
   .passthrough();
 

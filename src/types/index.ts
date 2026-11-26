@@ -300,6 +300,28 @@ export interface UserProfile {
 
 export type PolicySectionKey = 'terms' | 'privacy' | 'shipping' | 'custom' | 'authenticity';
 
+export enum SocialPlatform {
+  FACEBOOK = 'FACEBOOK',
+  INSTAGRAM = 'INSTAGRAM',
+  YOUTUBE = 'YOUTUBE',
+  RUMBLE = 'RUMBLE',
+  X = 'X',
+  TIKTOK = 'TIKTOK',
+  PINTEREST = 'PINTEREST',
+  LINKEDIN = 'LINKEDIN',
+  THREADS = 'THREADS',
+  DISCORD = 'DISCORD',
+  WHATSAPP = 'WHATSAPP',
+  WEBSITE = 'WEBSITE',
+}
+
+export interface SocialLink {
+  id: string;
+  platform: SocialPlatform;
+  url: string;
+  label?: string;
+}
+
 export interface SiteSettings {
   siteName: string;
   tagline: string;
@@ -342,6 +364,7 @@ export interface SiteSettings {
   paypalClientId?: string;
   cashOnPickupEnabled?: boolean;
   cashOnPickupInstructions?: string;
+  socialLinks?: SocialLink[];
 }
 
 export interface PageSeoMetadata {

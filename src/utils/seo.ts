@@ -165,6 +165,10 @@ export function buildStoreStructuredData(params: {
     ? (params.products || []).find((p) => p.id === params.activeProductId && p.published)
     : undefined;
 
+  const socialSameAs = (params.settings.socialLinks || [])
+    .map((item) => item.url?.trim())
+    .filter((url): url is string => Boolean(url && /^https?:\/\//i.test(url)));
+
   const storeNode = {
     '@type': 'Store',
     '@id': `${cleanOrigin}/#store`,
@@ -177,6 +181,7 @@ export function buildStoreStructuredData(params: {
     telephone: params.settings.contactPhone,
     currenciesAccepted: 'NZD',
     priceRange: '$$',
+    ...(socialSameAs.length > 0 ? { sameAs: socialSameAs } : {}),
     address: {
       '@type': 'PostalAddress',
       streetAddress: params.settings.workshopAddress,

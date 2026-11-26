@@ -57,6 +57,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   cashOnPickupEnabled: true,
   cashOnPickupInstructions:
     'Pay in cash when collecting your piece directly from Jesse at 42 Carlyle Street, Napier. We will email you as soon as your taonga is ready for pickup.',
+  socialLinks: [],
 };
 
 export const DEFAULT_CUSTOM_PRICING: CustomPricingConfig = {

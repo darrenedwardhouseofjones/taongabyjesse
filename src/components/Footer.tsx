@@ -1,6 +1,8 @@
 import React from 'react';
 import { ShieldCheck, MapPin, Mail, Phone } from 'lucide-react';
 import { PolicySectionKey, SiteSettings } from '../types';
+import { getSocialPlatformMeta, isSafeHttpUrl } from '../utils/socials';
+import { SocialIcon } from './SocialIcon';
 import type { AppTab } from './Navbar';
 
 interface FooterProps {
@@ -63,6 +65,39 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate, settings }) => {
                 <span>{settings.contactPhone}</span>
               </div>
             </div>
+            {(() => {
+              const safeSocials = (settings.socialLinks || []).filter((item) =>
+                isSafeHttpUrl(item.url)
+              );
+              if (safeSocials.length === 0) return null;
+              return (
+                <div className="pt-2 space-y-2">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#7FA892]">
+                    Follow the Atelier
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {safeSocials.map((item) => {
+                      const meta = getSocialPlatformMeta(item.platform);
+                      const displayLabel = item.label?.trim() || meta.label;
+                      return (
+                        <a
+                          key={item.id}
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label={`${meta.label}: ${displayLabel}`}
+                          title={displayLabel}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-[#FAF9F6] hover:bg-white/15 hover:border-[#7FA892]/60 transition-colors"
+                        >
+                          <SocialIcon platform={item.platform} className="w-3.5 h-3.5 text-[#7FA892]" />
+                          <span className="text-[11px] font-medium">{displayLabel}</span>
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Navigation with English clarity */}

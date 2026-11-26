@@ -39,6 +39,9 @@ import {
   Award,
   Printer,
   Wallet,
+  ArrowUp,
+  ArrowDown,
+  ExternalLink,
 } from 'lucide-react';
 import { DEFAULT_SITE_SETTINGS } from '../utils/defaults';
 import {
@@ -60,11 +63,20 @@ import {
   PolicySectionKey,
   Product,
   SiteSettings,
+  SocialLink,
+  SocialPlatform,
   StoneVariety,
 } from '../types';
 import { formatNZD, PACKAGE_SIZES } from '../utils/pricing';
 import { downloadOrdersCsv } from '../utils/ordersCsv';
 import { apiFetch } from '../utils/api';
+import {
+  SOCIAL_PLATFORM_OPTIONS,
+  getSocialPlatformMeta,
+  isSafeHttpUrl,
+  normalizeSocialUrl,
+} from '../utils/socials';
+import { SocialIcon } from './SocialIcon';
 import { SeoAuditSection } from './SeoAuditSection';
 import { CertificatePrintModal } from './CertificateOfAuthenticity';
 import { TaongaGrowthChart } from './TaongaGrowthChart';
@@ -84,6 +96,7 @@ import {
   productPayloadSchema,
   seoSettingsSchema,
   siteSettingsUpdateSchema,
+  socialLinkSchema,
   validateWithSchema,
 } from '../validation/schemas';
 
@@ -393,6 +406,74 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } finally {
       setPoliciesSaving(false);
     }
+  };
+
+  // Social Media Links Draft State
+  const [socialPlatformDraft, setSocialPlatformDraft] = useState<SocialPlatform>(
+    SocialPlatform.FACEBOOK
+  );
+  const [socialUrlDraft, setSocialUrlDraft] = useState('');
+  const [socialLabelDraft, setSocialLabelDraft] = useState('');
+  const [socialSaving, setSocialSaving] = useState(false);
+  const [socialError, setSocialError] = useState<string | null>(null);
+  const [socialSavedToast, setSocialSavedToast] = useState(false);
+
+  const persistSocialLinks = async (nextLinks: SocialLink[]) => {
+    setSocialError(null);
+    setSocialSaving(true);
+    try {
+      await onUpdateSettings({
+        ...settings,
+        socialLinks: nextLinks,
+      });
+      setSocialSavedToast(true);
+      setTimeout(() => setSocialSavedToast(false), 3000);
+    } catch (err) {
+      setSocialError(
+        err instanceof Error ? err.message : 'Failed to save social links to database.'
+      );
+    } finally {
+      setSocialSaving(false);
+    }
+  };
+
+  const handleAddSocialLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSocialError(null);
+    const normalizedUrl = normalizeSocialUrl(socialUrlDraft);
+    const candidate: SocialLink = {
+      id: `soc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      platform: socialPlatformDraft,
+      url: normalizedUrl,
+      ...(socialLabelDraft.trim() ? { label: socialLabelDraft.trim() } : {}),
+    };
+    const parsed = validateWithSchema(socialLinkSchema, candidate);
+    if (!parsed.success) {
+      setSocialError(parsed.error);
+      return;
+    }
+    const existing = settings.socialLinks || [];
+    if (existing.length >= 24) {
+      setSocialError('Maximum of 24 social links reached.');
+      return;
+    }
+    await persistSocialLinks([...existing, parsed.data as SocialLink]);
+    setSocialUrlDraft('');
+    setSocialLabelDraft('');
+  };
+
+  const handleRemoveSocialLink = async (id: string) => {
+    const existing = settings.socialLinks || [];
+    await persistSocialLinks(existing.filter((item) => item.id !== id));
+  };
+
+  const handleMoveSocialLink = async (index: number, direction: -1 | 1) => {
+    const existing = [...(settings.socialLinks || [])];
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= existing.length) return;
+    const [moved] = existing.splice(index, 1);
+    existing.splice(targetIndex, 0, moved);
+    await persistSocialLinks(existing);
   };
 
   useEffect(() => {
@@ -4581,6 +4662,166 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+
+          {/* Social Media & Community Channels */}
+          <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-5 shadow-xs">
+            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E8E2D6] pb-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-[#18231C] flex items-center gap-2">
+                  <Share2 className="w-4 h-4 text-[#1B382B]" />
+                  Social Media &amp; Community Channels
+                </h3>
+                <p className="text-xs text-[#526058] mt-1">
+                  Select a platform from the dropdown, paste your studio profile or channel URL, and add it. Saved links automatically appear in the storefront footer and Store JSON-LD <code className="font-mono">sameAs</code> metadata.
+                </p>
+              </div>
+              {socialSavedToast && (
+                <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Social Links Saved
+                </span>
+              )}
+            </div>
+
+            {socialError && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                {socialError}
+              </div>
+            )}
+
+            <form
+              onSubmit={handleAddSocialLink}
+              className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end text-xs bg-[#FAF9F6] p-4 rounded-xl border border-[#E8E2D6]"
+            >
+              <div className="md:col-span-3 space-y-1">
+                <label className="font-semibold text-[#18231C] block">Platform</label>
+                <select
+                  value={socialPlatformDraft}
+                  onChange={(e) => setSocialPlatformDraft(e.target.value as SocialPlatform)}
+                  className="w-full p-2.5 bg-white border border-[#E8E2D6] rounded-lg font-medium text-[#18231C]"
+                >
+                  {SOCIAL_PLATFORM_OPTIONS.map((opt) => (
+                    <option key={opt.platform} value={opt.platform}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="md:col-span-5 space-y-1">
+                <label className="font-semibold text-[#18231C] block">Profile or Channel URL</label>
+                <input
+                  type="text"
+                  value={socialUrlDraft}
+                  onChange={(e) => setSocialUrlDraft(e.target.value)}
+                  placeholder={getSocialPlatformMeta(socialPlatformDraft).placeholder}
+                  className="w-full p-2.5 bg-white border border-[#E8E2D6] rounded-lg"
+                />
+              </div>
+              <div className="md:col-span-2 space-y-1">
+                <label className="font-semibold text-[#18231C] block">Label (optional)</label>
+                <input
+                  type="text"
+                  value={socialLabelDraft}
+                  onChange={(e) => setSocialLabelDraft(e.target.value)}
+                  placeholder="e.g. @pounamu"
+                  maxLength={80}
+                  className="w-full p-2.5 bg-white border border-[#E8E2D6] rounded-lg"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <button
+                  type="submit"
+                  disabled={socialSaving}
+                  className="w-full py-2.5 px-3 bg-[#1B382B] text-white rounded-lg font-semibold hover:bg-[#2D5A46] disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {socialSaving ? 'Saving...' : 'Add Social'}
+                </button>
+              </div>
+            </form>
+
+            {(settings.socialLinks || []).length === 0 ? (
+              <div className="text-xs text-[#526058] italic py-3 px-4 rounded-xl border border-dashed border-[#E8E2D6] bg-[#FAF9F6]/60">
+                No social channels added yet. Choose a platform above (Facebook, Instagram, YouTube, Rumble, X, and more) and click Add Social.
+              </div>
+            ) : (
+              <div className="divide-y divide-[#E8E2D6] border border-[#E8E2D6] rounded-xl overflow-hidden">
+                {(settings.socialLinks || []).map((link, index) => {
+                  const meta = getSocialPlatformMeta(link.platform);
+                  const safe = isSafeHttpUrl(link.url);
+                  return (
+                    <div
+                      key={link.id}
+                      className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-white hover:bg-[#FAF9F6] text-xs"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className="w-8 h-8 rounded-lg bg-[#FAF9F6] border border-[#E8E2D6] flex items-center justify-center text-[#1B382B] shrink-0">
+                          <SocialIcon platform={link.platform} className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-bold text-[#18231C] flex items-center gap-2">
+                            <span>{meta.label}</span>
+                            {link.label?.trim() && (
+                              <span className="text-[11px] font-medium text-[#526058]">
+                                ({link.label.trim()})
+                              </span>
+                            )}
+                          </div>
+                          {safe ? (
+                            <a
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[11px] text-[#2D5A46] hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                            >
+                              <span className="truncate">{link.url}</span>
+                              <ExternalLink className="w-3 h-3 shrink-0" />
+                            </a>
+                          ) : (
+                            <span className="text-[11px] text-red-600 truncate block">
+                              {link.url}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={socialSaving || index === 0}
+                          onClick={() => handleMoveSocialLink(index, -1)}
+                          aria-label={`Move ${meta.label} up`}
+                          className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
+                        >
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            socialSaving || index === (settings.socialLinks || []).length - 1
+                          }
+                          onClick={() => handleMoveSocialLink(index, 1)}
+                          aria-label={`Move ${meta.label} down`}
+                          className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
+                        >
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={socialSaving}
+                          onClick={() => handleRemoveSocialLink(link.id)}
+                          aria-label={`Remove ${meta.label}`}
+                          className="px-2.5 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50 font-semibold inline-flex items-center gap-1 disabled:opacity-40 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Legal Pages: Terms, Privacy Act 2020, Shipping & Returns, Custom Commissions */}
