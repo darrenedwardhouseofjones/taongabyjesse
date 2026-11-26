@@ -9,6 +9,7 @@ import {
   DEFAULT_SITE_SETTINGS,
 } from '../src/utils/defaults.ts';
 import type {
+  CertificateRecord,
   Courier,
   CourierRate,
   CourierService,
@@ -110,6 +111,8 @@ db.exec(`
     id INTEGER PRIMARY KEY CHECK (id = 1),
     stripe_secret_key TEXT NOT NULL DEFAULT '',
     stripe_webhook_secret TEXT NOT NULL DEFAULT '',
+    paypal_client_secret TEXT NOT NULL DEFAULT '',
+    paypal_webhook_id TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
   );
 
@@ -210,6 +213,8 @@ db.exec(`
     purchase_payment_method TEXT NOT NULL DEFAULT 'STRIPE',
     purchase_status TEXT NOT NULL DEFAULT 'ACTIVE',
     stripe_payment_intent_id TEXT NOT NULL DEFAULT '',
+    paypal_order_id TEXT NOT NULL DEFAULT '',
+    paypal_capture_id TEXT NOT NULL DEFAULT '',
     is_active INTEGER NOT NULL DEFAULT 1,
     order_number TEXT NOT NULL DEFAULT '',
     expires_at TEXT,
@@ -228,7 +233,47 @@ db.exec(`
     expires_at TEXT,
     redeemed_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS certificates (
+    certificate_number TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    order_number TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    item_index INTEGER NOT NULL DEFAULT 1,
+    authenticity_code TEXT NOT NULL,
+    buyer_name TEXT NOT NULL,
+    buyer_email TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    data_json TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_certificates_order_id ON certificates(order_id);
+  CREATE INDEX IF NOT EXISTS idx_certificates_auth_code ON certificates(authenticity_code);
+
+  CREATE TABLE IF NOT EXISTS agent_carts (
+    id TEXT PRIMARY KEY,
+    items_json TEXT NOT NULL,
+    discount_code TEXT NOT NULL DEFAULT '',
+    selected_service_id TEXT NOT NULL DEFAULT '',
+    payment_method TEXT NOT NULL DEFAULT 'STRIPE',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
 `);
+
+// Safe incremental column migrations for existing SQLite databases
+function ensureColumnExists(tableName: string, columnName: string, columnDefSql: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefSql}`);
+  }
+}
+
+ensureColumnExists('payment_secrets', 'paypal_client_secret', "TEXT NOT NULL DEFAULT ''");
+ensureColumnExists('payment_secrets', 'paypal_webhook_id', "TEXT NOT NULL DEFAULT ''");
+ensureColumnExists('gift_cards', 'paypal_order_id', "TEXT NOT NULL DEFAULT ''");
+ensureColumnExists('gift_cards', 'paypal_capture_id', "TEXT NOT NULL DEFAULT ''");
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -861,8 +906,322 @@ export function findOrderByOrderNumber(orderNumber: string): Order | null {
   return row ? (JSON.parse(row.data_json) as Order) : null;
 }
 
+function generateUniqueCertificateNumber(yearStr: string): string {
+  for (let i = 0; i < 12; i++) {
+    const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const candidate = `TBJ-${yearStr}-${suffix}`;
+    const exists = db
+      .prepare('SELECT 1 FROM certificates WHERE certificate_number = ?')
+      .get(candidate);
+    if (!exists) return candidate;
+  }
+  return `TBJ-${yearStr}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+}
+
+function issueCertificatesForOrderTx(order: Order): {
+  order: Order;
+  certificates: CertificateRecord[];
+} {
+  const existingRows = db
+    .prepare(
+      'SELECT data_json FROM certificates WHERE order_id = ? ORDER BY product_id ASC, item_index ASC'
+    )
+    .all(order.id) as { data_json: string }[];
+  const existingCerts = existingRows.map((r) => JSON.parse(r.data_json) as CertificateRecord);
+
+  const yearStr = String(new Date(order.createdAt || Date.now()).getFullYear());
+  const nowIso = new Date().toISOString();
+  const insertStmt = db.prepare(
+    `INSERT INTO certificates (
+      certificate_number, order_id, order_number, product_id, item_index,
+      authenticity_code, buyer_name, buyer_email, issued_at, data_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const getProdStmt = db.prepare('SELECT data_json FROM products WHERE id = ?');
+
+  const certs: CertificateRecord[] = [...existingCerts];
+  let orderChanged = false;
+
+  const updatedItems = order.items.map((item) => {
+    const prodRow = getProdStmt.get(item.productId) as { data_json: string } | undefined;
+    const prod = prodRow ? (JSON.parse(prodRow.data_json) as Product) : null;
+
+    const existingForProduct = existingCerts.filter((c) => c.productId === item.productId);
+    const numbers: string[] = [];
+
+    const unitCount = Math.max(1, item.quantity || 1);
+    for (let u = 1; u <= unitCount; u++) {
+      const existingUnit = existingForProduct.find((c) => c.itemIndex === u);
+      if (existingUnit) {
+        numbers.push(existingUnit.certificateNumber);
+        continue;
+      }
+
+      const certNum = generateUniqueCertificateNumber(yearStr);
+      const record: CertificateRecord = {
+        certificateNumber: certNum,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        productId: item.productId,
+        itemIndex: u,
+        title: item.title,
+        sku: item.sku,
+        material: item.material,
+        designType: item.designType || prod?.designType,
+        dimensions: item.dimensions || prod?.dimensions,
+        authenticityCode: item.authenticityCode,
+        originRiver: item.originRiver,
+        permitRef: item.permitRef || prod?.permitRef,
+        carverName: item.carverName || prod?.carverName || 'Jesse',
+        image: item.image || prod?.images?.[0] || '',
+        buyerName: order.customerName.trim(),
+        buyerEmail: order.customerEmail.trim().toLowerCase(),
+        issuedAt: order.createdAt || nowIso,
+      };
+      insertStmt.run(
+        record.certificateNumber,
+        record.orderId,
+        record.orderNumber,
+        record.productId,
+        record.itemIndex,
+        record.authenticityCode,
+        record.buyerName,
+        record.buyerEmail,
+        record.issuedAt,
+        JSON.stringify(record)
+      );
+      certs.push(record);
+      numbers.push(certNum);
+      orderChanged = true;
+    }
+
+    const enrichedItem = {
+      ...item,
+      designType: item.designType || prod?.designType,
+      dimensions: item.dimensions || prod?.dimensions,
+      permitRef: item.permitRef || prod?.permitRef,
+      carverName: item.carverName || prod?.carverName || 'Jesse',
+      certificateNumbers: numbers,
+    };
+    return enrichedItem;
+  });
+
+  if (!orderChanged && order.items.every((it) => it.certificateNumbers && it.certificateNumbers.length > 0)) {
+    return { order, certificates: certs };
+  }
+
+  const nextOrder: Order = { ...order, items: updatedItems };
+  db.prepare('UPDATE orders SET data_json = ? WHERE id = ?').run(
+    JSON.stringify(nextOrder),
+    nextOrder.id
+  );
+  return { order: nextOrder, certificates: certs };
+}
+
+export function getCertificatesForOrder(orderId: string): CertificateRecord[] {
+  const rows = db
+    .prepare(
+      'SELECT data_json FROM certificates WHERE order_id = ? ORDER BY rowid ASC'
+    )
+    .all(orderId) as { data_json: string }[];
+  return rows.map((r) => JSON.parse(r.data_json) as CertificateRecord);
+}
+
+export function ensureCertificatesForOrder(orderId: string): {
+  order: Order | null;
+  certificates: CertificateRecord[];
+} {
+  const tx = db.transaction(() => {
+    const order = getOrderById(orderId);
+    if (!order || order.status === 'PENDING') {
+      return { order, certificates: [] as CertificateRecord[] };
+    }
+    return issueCertificatesForOrderTx(order);
+  });
+  return tx();
+}
+
+export interface ProvenanceVerifyResponse {
+  verified: boolean;
+  record: {
+    certificateNumber?: string;
+    title: string;
+    authenticityCode: string;
+    originRiver: string;
+    material: StoneVariety;
+    designType?: DesignMotif;
+    dimensions?: string;
+    carverName: string;
+    image: string;
+    permitRef?: string;
+    issuedAt?: string;
+    orderNumber?: string;
+    hasRecordedSale: boolean;
+    buyerCheckStatus: 'UNCHECKED' | 'MATCHED' | 'MISMATCH';
+  } | null;
+}
+
+function matchesRecordedBuyer(cert: CertificateRecord, buyerInput: string): boolean {
+  const clean = buyerInput.trim().toLowerCase();
+  if (!clean) return false;
+  if (clean === cert.buyerEmail.trim().toLowerCase()) return true;
+  const fullName = cert.buyerName.trim().toLowerCase();
+  if (!fullName) return false;
+  if (clean === fullName) return true;
+  if (clean.length >= 3) {
+    const tokens = fullName.split(/\s+/).filter((t) => t.length >= 3);
+    if (tokens.includes(clean)) return true;
+  }
+  return false;
+}
+
+export function verifyCertificateOrProvenance(
+  rawCode: string,
+  buyerCheck?: string
+): ProvenanceVerifyResponse {
+  const code = rawCode.trim().toUpperCase();
+  if (!code) return { verified: false, record: null };
+
+  const cleanBuyer = buyerCheck?.trim() || '';
+
+  const certRows = db
+    .prepare(
+      `SELECT data_json FROM certificates
+       WHERE UPPER(certificate_number) = ? OR UPPER(authenticity_code) = ?
+       ORDER BY issued_at DESC LIMIT 50`
+    )
+    .all(code, code) as { data_json: string }[];
+
+  if (certRows.length > 0) {
+    const parsedCerts = certRows.map((r) => JSON.parse(r.data_json) as CertificateRecord);
+    const matchedCert = cleanBuyer
+      ? parsedCerts.find((c) => matchesRecordedBuyer(c, cleanBuyer)) || parsedCerts[0]
+      : parsedCerts[0];
+    const buyerCheckStatus: 'UNCHECKED' | 'MATCHED' | 'MISMATCH' = !cleanBuyer
+      ? 'UNCHECKED'
+      : matchesRecordedBuyer(matchedCert, cleanBuyer)
+      ? 'MATCHED'
+      : 'MISMATCH';
+
+    return {
+      verified: true,
+      record: {
+        certificateNumber: matchedCert.certificateNumber,
+        title: matchedCert.title,
+        authenticityCode: matchedCert.authenticityCode,
+        originRiver: matchedCert.originRiver,
+        material: matchedCert.material,
+        designType: matchedCert.designType,
+        dimensions: matchedCert.dimensions,
+        carverName: matchedCert.carverName || 'Jesse',
+        image: matchedCert.image,
+        permitRef: matchedCert.permitRef,
+        issuedAt: matchedCert.issuedAt,
+        orderNumber: matchedCert.orderNumber,
+        hasRecordedSale: true,
+        buyerCheckStatus,
+      },
+    };
+  }
+
+  // Backfill any historical completed orders matching this code before falling back to catalogue
+  const orders = getAllOrders().filter((o) => o.status !== 'PENDING');
+  for (const order of orders) {
+    const item = order.items.find(
+      (i) =>
+        i.authenticityCode.trim().toUpperCase() === code ||
+        (i.certificateNumbers || []).some((c) => c.toUpperCase() === code)
+    );
+    if (item) {
+      const issued = ensureCertificatesForOrder(order.id);
+      const matchingIssued = issued.certificates.filter(
+        (c) =>
+          c.certificateNumber.toUpperCase() === code ||
+          c.authenticityCode.toUpperCase() === code
+      );
+      const createdCert = cleanBuyer
+        ? matchingIssued.find((c) => matchesRecordedBuyer(c, cleanBuyer)) || matchingIssued[0]
+        : matchingIssued[0];
+      if (createdCert) {
+        const buyerCheckStatus: 'UNCHECKED' | 'MATCHED' | 'MISMATCH' = !cleanBuyer
+          ? 'UNCHECKED'
+          : matchesRecordedBuyer(createdCert, cleanBuyer)
+          ? 'MATCHED'
+          : 'MISMATCH';
+        return {
+          verified: true,
+          record: {
+            certificateNumber: createdCert.certificateNumber,
+            title: createdCert.title,
+            authenticityCode: createdCert.authenticityCode,
+            originRiver: createdCert.originRiver,
+            material: createdCert.material,
+            designType: createdCert.designType,
+            dimensions: createdCert.dimensions,
+            carverName: createdCert.carverName || 'Jesse',
+            image: createdCert.image,
+            permitRef: createdCert.permitRef,
+            issuedAt: createdCert.issuedAt,
+            orderNumber: createdCert.orderNumber,
+            hasRecordedSale: true,
+            buyerCheckStatus,
+          },
+        };
+      }
+    }
+  }
+
+  const products = getAllProducts();
+  const matchedProduct = products.find(
+    (p) => p.authenticityCode.trim().toUpperCase() === code
+  );
+  if (matchedProduct) {
+    return {
+      verified: true,
+      record: {
+        title: matchedProduct.title,
+        authenticityCode: matchedProduct.authenticityCode,
+        originRiver: matchedProduct.originRiver,
+        material: matchedProduct.material,
+        designType: matchedProduct.designType,
+        dimensions: matchedProduct.dimensions,
+        carverName: matchedProduct.carverName || 'Jesse',
+        image: matchedProduct.images[0] || '',
+        permitRef: matchedProduct.permitRef,
+        hasRecordedSale: false,
+        buyerCheckStatus: 'UNCHECKED',
+      },
+    };
+  }
+
+  const galleryItems = getGalleryItems();
+  const matchedGallery = galleryItems.find(
+    (g) => g.authenticityCode.trim().toUpperCase() === code
+  );
+  if (matchedGallery) {
+    return {
+      verified: true,
+      record: {
+        title: matchedGallery.title,
+        authenticityCode: matchedGallery.authenticityCode,
+        originRiver: matchedGallery.originRiver,
+        material: matchedGallery.material,
+        designType: matchedGallery.designType,
+        dimensions: matchedGallery.dimensions,
+        carverName: matchedGallery.carverName || 'Jesse',
+        image: matchedGallery.imageUrl || '',
+        hasRecordedSale: false,
+        buyerCheckStatus: 'UNCHECKED',
+      },
+    };
+  }
+
+  return { verified: false, record: null };
+}
+
 export function createOrder(order: Order, userId?: string): Order {
   const enrichedOrder: Order = userId ? { ...order, userId } : order;
+  let savedOrder = enrichedOrder;
 
   const tx = db.transaction(() => {
     db.prepare(
@@ -889,10 +1248,14 @@ export function createOrder(order: Order, userId?: string): Order {
         }
       }
     }
+
+    if (enrichedOrder.status !== 'PENDING') {
+      savedOrder = issueCertificatesForOrderTx(enrichedOrder).order;
+    }
   });
 
   tx();
-  return enrichedOrder;
+  return savedOrder;
 }
 
 export function updateOrder(order: Order): Order {
@@ -918,7 +1281,33 @@ export function getOrderByPaymentIntentId(paymentIntentId: string): Order | null
   return null;
 }
 
-// --- Payment Secrets & Stripe Webhook Idempotency Helpers ---
+export function getOrderByPayPalOrderId(paypalOrderId: string): Order | null {
+  const clean = paypalOrderId.trim();
+  if (!clean) return null;
+  const rows = db.prepare('SELECT data_json FROM orders ORDER BY created_at DESC LIMIT 300').all() as {
+    data_json: string;
+  }[];
+  for (const r of rows) {
+    const o = JSON.parse(r.data_json) as Order;
+    if (o.paypalOrderId === clean) return o;
+  }
+  return null;
+}
+
+export function getOrderByPayPalCaptureId(captureId: string): Order | null {
+  const clean = captureId.trim();
+  if (!clean) return null;
+  const rows = db.prepare('SELECT data_json FROM orders ORDER BY created_at DESC LIMIT 300').all() as {
+    data_json: string;
+  }[];
+  for (const r of rows) {
+    const o = JSON.parse(r.data_json) as Order;
+    if (o.paypalCaptureId === clean) return o;
+  }
+  return null;
+}
+
+// --- Payment Secrets & Webhook Idempotency Helpers ---
 
 function maskSecretKey(raw: string): string {
   const clean = raw.trim();
@@ -974,14 +1363,71 @@ export function getResolvedStripeCredentials(): {
   };
 }
 
+export function getResolvedPayPalCredentials(): {
+  clientId: string;
+  clientSecret: string;
+  webhookId: string;
+  mode: 'sandbox' | 'live';
+  secretSource: 'database' | 'env' | 'none';
+  webhookSource: 'database' | 'env' | 'none';
+} {
+  const settings = getSiteSettings();
+  const row = db
+    .prepare('SELECT paypal_client_secret, paypal_webhook_id FROM payment_secrets WHERE id = 1')
+    .get() as { paypal_client_secret?: string; paypal_webhook_id?: string } | undefined;
+
+  const dbSecret = row?.paypal_client_secret?.trim() || '';
+  const envSecret = process.env.PAYPAL_CLIENT_SECRET?.trim() || '';
+  const clientSecret = dbSecret || envSecret;
+  const secretSource: 'database' | 'env' | 'none' = dbSecret
+    ? 'database'
+    : envSecret
+    ? 'env'
+    : 'none';
+
+  const dbWebhook = row?.paypal_webhook_id?.trim() || '';
+  const envWebhook = process.env.PAYPAL_WEBHOOK_ID?.trim() || '';
+  const webhookId = dbWebhook || envWebhook;
+  const webhookSource: 'database' | 'env' | 'none' = dbWebhook
+    ? 'database'
+    : envWebhook
+    ? 'env'
+    : 'none';
+
+  const clientId =
+    settings.paypalClientId?.trim() ||
+    process.env.PAYPAL_CLIENT_ID?.trim() ||
+    process.env.VITE_PAYPAL_CLIENT_ID?.trim() ||
+    '';
+
+  const mode: 'sandbox' | 'live' =
+    settings.paypalMode === 'live' ||
+    (!settings.paypalMode && process.env.PAYPAL_MODE?.trim().toLowerCase() === 'live')
+      ? 'live'
+      : 'sandbox';
+
+  return {
+    clientId,
+    clientSecret,
+    webhookId,
+    mode,
+    secretSource,
+    webhookSource,
+  };
+}
+
 export function getAdminPaymentSettingsView() {
   const settings = getSiteSettings();
   const creds = getResolvedStripeCredentials();
+  const paypalCreds = getResolvedPayPalCredentials();
   return {
     stripeEnabled: settings.stripeEnabled ?? true,
     stripeMode: settings.stripeMode || 'test',
     stripePublishableKey: creds.publishableKey,
     stripeStatementDescriptor: settings.stripeStatementDescriptor || 'POUNAMU ATELIER',
+    paypalEnabled: settings.paypalEnabled ?? true,
+    paypalMode: paypalCreds.mode,
+    paypalClientId: paypalCreds.clientId,
     cashOnPickupEnabled: settings.cashOnPickupEnabled ?? true,
     cashOnPickupInstructions:
       settings.cashOnPickupInstructions ??
@@ -993,18 +1439,37 @@ export function getAdminPaymentSettingsView() {
     webhookSecretMasked: maskSecretKey(creds.webhookSecret),
     secretSource: creds.secretSource,
     webhookSource: creds.webhookSource,
+    hasPaypalSecret: Boolean(paypalCreds.clientSecret),
+    paypalSecretMasked: maskSecretKey(paypalCreds.clientSecret),
+    paypalSecretSource: paypalCreds.secretSource,
+    hasPaypalWebhookId: Boolean(paypalCreds.webhookId),
+    paypalWebhookIdMasked: maskSecretKey(paypalCreds.webhookId),
+    paypalWebhookSource: paypalCreds.webhookSource,
   };
 }
 
 export function savePaymentSecrets(params: {
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
+  paypalClientSecret?: string;
+  paypalWebhookId?: string;
   clearSecretKey?: boolean;
   clearWebhookSecret?: boolean;
+  clearPaypalSecret?: boolean;
+  clearPaypalWebhookId?: boolean;
 }): void {
   const existing = db
-    .prepare('SELECT stripe_secret_key, stripe_webhook_secret FROM payment_secrets WHERE id = 1')
-    .get() as { stripe_secret_key: string; stripe_webhook_secret: string } | undefined;
+    .prepare(
+      'SELECT stripe_secret_key, stripe_webhook_secret, paypal_client_secret, paypal_webhook_id FROM payment_secrets WHERE id = 1'
+    )
+    .get() as
+    | {
+        stripe_secret_key: string;
+        stripe_webhook_secret: string;
+        paypal_client_secret?: string;
+        paypal_webhook_id?: string;
+      }
+    | undefined;
 
   const nextSecret = params.clearSecretKey
     ? ''
@@ -1018,15 +1483,30 @@ export function savePaymentSecrets(params: {
     ? params.stripeWebhookSecret.trim()
     : existing?.stripe_webhook_secret || '';
 
+  const nextPaypalSecret = params.clearPaypalSecret
+    ? ''
+    : params.paypalClientSecret && params.paypalClientSecret.trim()
+    ? params.paypalClientSecret.trim()
+    : existing?.paypal_client_secret || '';
+
+  const nextPaypalWebhook = params.clearPaypalWebhookId
+    ? ''
+    : params.paypalWebhookId && params.paypalWebhookId.trim()
+    ? params.paypalWebhookId.trim()
+    : existing?.paypal_webhook_id || '';
+
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO payment_secrets (id, stripe_secret_key, stripe_webhook_secret, updated_at)
-     VALUES (1, ?, ?, ?)
+    `INSERT INTO payment_secrets (
+       id, stripe_secret_key, stripe_webhook_secret, paypal_client_secret, paypal_webhook_id, updated_at
+     ) VALUES (1, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        stripe_secret_key = excluded.stripe_secret_key,
        stripe_webhook_secret = excluded.stripe_webhook_secret,
+       paypal_client_secret = excluded.paypal_client_secret,
+       paypal_webhook_id = excluded.paypal_webhook_id,
        updated_at = excluded.updated_at`
-  ).run(nextSecret, nextWebhook, now);
+  ).run(nextSecret, nextWebhook, nextPaypalSecret, nextPaypalWebhook, now);
 }
 
 // --- Stock Reservations & Atomic Stripe Checkout Lifecycle ---
@@ -1232,10 +1712,11 @@ export function createCashOnPickupOrderAtomic(
         enrichedOrder.createdAt,
         JSON.stringify(enrichedOrder)
       );
+      return issueCertificatesForOrderTx(enrichedOrder).order;
     });
 
-    tx();
-    return { ok: true, order: enrichedOrder };
+    const finalOrder = tx();
+    return { ok: true, order: finalOrder };
   } catch (err) {
     return {
       ok: false,
@@ -1322,10 +1803,11 @@ export function createGiftCardPaidOrderAtomic(
         enrichedOrder.createdAt,
         JSON.stringify(enrichedOrder)
       );
+      return issueCertificatesForOrderTx(enrichedOrder).order;
     });
 
-    tx();
-    return { ok: true, order: enrichedOrder, remainingGiftCardBalanceCents: remainingAfter };
+    const finalOrder = tx();
+    return { ok: true, order: finalOrder, remainingGiftCardBalanceCents: remainingAfter };
   } catch (err) {
     return {
       ok: false,
@@ -1370,9 +1852,18 @@ export function attachStripePaymentIntent(orderId: string, paymentIntentId: stri
   return updateOrder(updated);
 }
 
+export function attachPayPalOrder(orderId: string, paypalOrderId: string): Order | null {
+  const existing = getOrderById(orderId);
+  if (!existing) return null;
+  const updated: Order = { ...existing, paypalOrderId };
+  return updateOrder(updated);
+}
+
 export function markOrderPaidAtomic(params: {
   orderId: string;
-  paymentIntentId: string;
+  paymentIntentId?: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
   stripeFeeCents?: number;
   netCents?: number;
   eventId?: string;
@@ -1387,7 +1878,8 @@ export function markOrderPaidAtomic(params: {
       if (seen) {
         const existingOrder =
           (params.orderId ? getOrderById(params.orderId) : null) ||
-          (params.paymentIntentId ? getOrderByPaymentIntentId(params.paymentIntentId) : null);
+          (params.paymentIntentId ? getOrderByPaymentIntentId(params.paymentIntentId) : null) ||
+          (params.paypalOrderId ? getOrderByPayPalOrderId(params.paypalOrderId) : null);
         return { order: existingOrder, alreadyProcessed: true };
       }
       db.prepare('INSERT INTO stripe_events (event_id, event_type, received_at) VALUES (?, ?, ?)').run(
@@ -1399,7 +1891,8 @@ export function markOrderPaidAtomic(params: {
 
     const order =
       (params.orderId ? getOrderById(params.orderId) : null) ||
-      (params.paymentIntentId ? getOrderByPaymentIntentId(params.paymentIntentId) : null);
+      (params.paymentIntentId ? getOrderByPaymentIntentId(params.paymentIntentId) : null) ||
+      (params.paypalOrderId ? getOrderByPayPalOrderId(params.paypalOrderId) : null);
     if (!order) {
       return { order: null, alreadyProcessed: false };
     }
@@ -1454,19 +1947,26 @@ export function markOrderPaidAtomic(params: {
       }
     }
 
+    const defaultFeeEstimate =
+      order.paymentMethod === 'PAYPAL'
+        ? Math.round(order.totalCents * 0.034 + 45)
+        : Math.round(order.totalCents * 0.027 + 30);
+
     const feeCents =
       typeof params.stripeFeeCents === 'number'
         ? params.stripeFeeCents
-        : order.stripeFeeCents || Math.round(order.totalCents * 0.027 + 30);
+        : order.stripeFeeCents || defaultFeeEstimate;
     const netCents =
       typeof params.netCents === 'number' ? params.netCents : Math.max(0, order.totalCents - feeCents);
 
     const paidOrder: Order = {
       ...order,
-      paymentMethod: order.paymentMethod || 'STRIPE',
+      paymentMethod: order.paymentMethod || (params.paypalOrderId ? 'PAYPAL' : 'STRIPE'),
       paymentStatus: 'PAID',
       status: 'PAID',
       stripePaymentIntentId: params.paymentIntentId || order.stripePaymentIntentId,
+      paypalOrderId: params.paypalOrderId || order.paypalOrderId,
+      paypalCaptureId: params.paypalCaptureId || order.paypalCaptureId,
       stripeFeeCents: feeCents,
       netCents: netCents + (order.giftCardAppliedCents || 0),
     };
@@ -1476,7 +1976,8 @@ export function markOrderPaidAtomic(params: {
       paidOrder.id
     );
 
-    return { order: paidOrder, alreadyProcessed: false };
+    const { order: orderWithCerts } = issueCertificatesForOrderTx(paidOrder);
+    return { order: orderWithCerts, alreadyProcessed: false };
   });
 
   return tx();
@@ -1487,11 +1988,16 @@ export function recordOrderRefund(params: {
   refundAmountCents?: number;
   absoluteRefundedCents?: number;
   refundId?: string;
+  paypalRefundId?: string;
 }): Order | null {
   const order = getOrderById(params.orderId);
   if (!order) return null;
 
-  if (params.refundId && order.stripeRefundId === params.refundId && typeof params.absoluteRefundedCents !== 'number') {
+  if (
+    ((params.refundId && order.stripeRefundId === params.refundId) ||
+      (params.paypalRefundId && order.paypalRefundId === params.paypalRefundId)) &&
+    typeof params.absoluteRefundedCents !== 'number'
+  ) {
     return order;
   }
 
@@ -1504,6 +2010,7 @@ export function recordOrderRefund(params: {
     ...order,
     refundedAmountCents: totalRefunded,
     stripeRefundId: params.refundId || order.stripeRefundId,
+    paypalRefundId: params.paypalRefundId || order.paypalRefundId,
     paymentStatus:
       totalRefunded >= order.totalCents ? 'REFUNDED' : order.paymentStatus || 'PAID',
     status: totalRefunded >= order.totalCents ? 'REFUNDED' : order.status,
@@ -1996,9 +2503,11 @@ interface DbGiftCardRow {
   recipient_name: string;
   recipient_email: string;
   message: string;
-  purchase_payment_method: 'STRIPE' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
+  purchase_payment_method: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
   purchase_status: GiftCardPurchaseStatus;
   stripe_payment_intent_id: string;
+  paypal_order_id?: string;
+  paypal_capture_id?: string;
   is_active: number;
   order_number: string;
   expires_at: string | null;
@@ -2069,6 +2578,8 @@ function mapGiftCardRow(row: DbGiftCardRow): GiftCard {
     purchasePaymentMethod: row.purchase_payment_method,
     purchaseStatus: row.purchase_status,
     stripePaymentIntentId: row.stripe_payment_intent_id,
+    paypalOrderId: row.paypal_order_id || undefined,
+    paypalCaptureId: row.paypal_capture_id || undefined,
     isActive: row.is_active === 1,
     orderNumber: row.order_number,
     expiresAt: row.expires_at || undefined,
@@ -2169,6 +2680,14 @@ export function getGiftCardByPaymentIntentId(paymentIntentId: string): GiftCard 
   const row = db
     .prepare('SELECT * FROM gift_cards WHERE stripe_payment_intent_id = ?')
     .get(paymentIntentId.trim()) as DbGiftCardRow | undefined;
+  return row ? mapGiftCardRow(row) : null;
+}
+
+export function getGiftCardByPayPalOrderId(paypalOrderId: string): GiftCard | null {
+  if (!paypalOrderId.trim()) return null;
+  const row = db
+    .prepare('SELECT * FROM gift_cards WHERE paypal_order_id = ?')
+    .get(paypalOrderId.trim()) as DbGiftCardRow | undefined;
   return row ? mapGiftCardRow(row) : null;
 }
 
@@ -2277,9 +2796,11 @@ export function createGiftCardRecord(params: {
   recipientName: string;
   recipientEmail: string;
   message?: string;
-  purchasePaymentMethod: 'STRIPE' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
+  purchasePaymentMethod: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
   purchaseStatus: GiftCardPurchaseStatus;
   stripePaymentIntentId?: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
   isActive: boolean;
   orderNumber?: string;
   expiresAt?: string;
@@ -2295,9 +2816,10 @@ export function createGiftCardRecord(params: {
     `INSERT INTO gift_cards (
        id, code, initial_amount_cents, remaining_balance_cents, currency,
        purchaser_name, purchaser_email, recipient_name, recipient_email, message,
-       purchase_payment_method, purchase_status, stripe_payment_intent_id, is_active,
+       purchase_payment_method, purchase_status, stripe_payment_intent_id,
+       paypal_order_id, paypal_capture_id, is_active,
        order_number, expires_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, 'NZD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, 'NZD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     code,
@@ -2311,6 +2833,8 @@ export function createGiftCardRecord(params: {
     params.purchasePaymentMethod,
     params.purchaseStatus,
     params.stripePaymentIntentId || '',
+    params.paypalOrderId || '',
+    params.paypalCaptureId || '',
     params.isActive ? 1 : 0,
     orderNumber,
     params.expiresAt || null,
@@ -2331,9 +2855,21 @@ export function attachStripePaymentIntentToGiftCard(giftCardId: string, paymentI
   return getGiftCardById(giftCardId);
 }
 
+export function attachPayPalOrderToGiftCard(giftCardId: string, paypalOrderId: string): GiftCard | null {
+  const now = new Date().toISOString();
+  db.prepare('UPDATE gift_cards SET paypal_order_id = ?, updated_at = ? WHERE id = ?').run(
+    paypalOrderId,
+    now,
+    giftCardId
+  );
+  return getGiftCardById(giftCardId);
+}
+
 export function activateGiftCardAtomic(params: {
   giftCardId?: string;
   paymentIntentId?: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
   eventId?: string;
   eventType?: string;
 }): { giftCard: GiftCard | null; newlyActivated: boolean } {
@@ -2346,7 +2882,8 @@ export function activateGiftCardAtomic(params: {
       if (seen) {
         const existing =
           (params.giftCardId ? getGiftCardById(params.giftCardId) : null) ||
-          (params.paymentIntentId ? getGiftCardByPaymentIntentId(params.paymentIntentId) : null);
+          (params.paymentIntentId ? getGiftCardByPaymentIntentId(params.paymentIntentId) : null) ||
+          (params.paypalOrderId ? getGiftCardByPayPalOrderId(params.paypalOrderId) : null);
         return { giftCard: existing, newlyActivated: false };
       }
       db.prepare('INSERT INTO stripe_events (event_id, event_type, received_at) VALUES (?, ?, ?)').run(
@@ -2363,6 +2900,8 @@ export function activateGiftCardAtomic(params: {
         ? db
             .prepare('SELECT * FROM gift_cards WHERE stripe_payment_intent_id = ?')
             .get(params.paymentIntentId)
+        : params.paypalOrderId
+        ? db.prepare('SELECT * FROM gift_cards WHERE paypal_order_id = ?').get(params.paypalOrderId)
         : undefined
     ) as DbGiftCardRow | undefined;
 
@@ -2371,8 +2910,21 @@ export function activateGiftCardAtomic(params: {
 
     if (wasPending) {
       db.prepare(
-        "UPDATE gift_cards SET purchase_status = 'ACTIVE', is_active = 1, stripe_payment_intent_id = COALESCE(NULLIF(?, ''), stripe_payment_intent_id), updated_at = ? WHERE id = ?"
-      ).run(params.paymentIntentId || '', now, row.id);
+        `UPDATE gift_cards SET
+           purchase_status = 'ACTIVE',
+           is_active = 1,
+           stripe_payment_intent_id = COALESCE(NULLIF(?, ''), stripe_payment_intent_id),
+           paypal_order_id = COALESCE(NULLIF(?, ''), paypal_order_id),
+           paypal_capture_id = COALESCE(NULLIF(?, ''), paypal_capture_id),
+           updated_at = ?
+         WHERE id = ?`
+      ).run(
+        params.paymentIntentId || '',
+        params.paypalOrderId || '',
+        params.paypalCaptureId || '',
+        now,
+        row.id
+      );
     }
 
     return { giftCard: getGiftCardById(row.id), newlyActivated: wasPending };
@@ -2445,3 +2997,128 @@ export function deleteGiftCard(id: string): boolean {
   const res = db.prepare('DELETE FROM gift_cards WHERE id = ?').run(id);
   return res.changes > 0;
 }
+
+// --- AI Agent Cart Sessions ---
+
+export interface AgentCartItemEntry {
+  productId: string;
+  quantity: number;
+}
+
+export interface AgentCartSession {
+  id: string;
+  items: AgentCartItemEntry[];
+  discountCode: string;
+  selectedServiceId: string;
+  paymentMethod: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP';
+  notes: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export function createAgentCartSession(params: {
+  items: AgentCartItemEntry[];
+  discountCode?: string;
+  selectedServiceId?: string;
+  paymentMethod?: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP';
+  notes?: string;
+  ttlHours?: number;
+}): AgentCartSession {
+  const now = new Date();
+  const ttlHours = Math.max(1, Math.min(72, params.ttlHours ?? 24));
+  const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
+  const id = `ac-${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`;
+
+  db.prepare('DELETE FROM agent_carts WHERE expires_at <= ?').run(now.toISOString());
+
+  const resolvedMethod: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP' =
+    params.paymentMethod === 'CASH_ON_PICKUP'
+      ? 'CASH_ON_PICKUP'
+      : params.paymentMethod === 'PAYPAL'
+      ? 'PAYPAL'
+      : 'STRIPE';
+
+  const session: AgentCartSession = {
+    id,
+    items: params.items.map((item) => ({
+      productId: item.productId,
+      quantity: Math.max(1, Math.floor(item.quantity)),
+    })),
+    discountCode: params.discountCode?.trim().toUpperCase() || '',
+    selectedServiceId: params.selectedServiceId?.trim() || '',
+    paymentMethod: resolvedMethod,
+    notes: params.notes?.trim() || '',
+    createdAt: now.toISOString(),
+    expiresAt,
+  };
+
+  db.prepare(
+    `INSERT INTO agent_carts (
+       id, items_json, discount_code, selected_service_id, payment_method, notes, created_at, expires_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    session.id,
+    JSON.stringify(session.items),
+    session.discountCode,
+    session.selectedServiceId,
+    session.paymentMethod,
+    session.notes,
+    session.createdAt,
+    session.expiresAt
+  );
+
+  return session;
+}
+
+export function getAgentCartSession(id: string): AgentCartSession | null {
+  const cleanId = id.trim();
+  if (!cleanId) return null;
+  const nowIso = new Date().toISOString();
+  const row = db
+    .prepare('SELECT * FROM agent_carts WHERE id = ? AND expires_at > ?')
+    .get(cleanId, nowIso) as
+    | {
+        id: string;
+        items_json: string;
+        discount_code: string;
+        selected_service_id: string;
+        payment_method: string;
+        notes: string;
+        created_at: string;
+        expires_at: string;
+      }
+    | undefined;
+  if (!row) return null;
+
+  let items: AgentCartItemEntry[] = [];
+  try {
+    const parsed = JSON.parse(row.items_json);
+    if (Array.isArray(parsed)) {
+      items = parsed
+        .filter((x) => x && typeof x.productId === 'string')
+        .map((x) => ({
+          productId: String(x.productId),
+          quantity: Math.max(1, Math.floor(Number(x.quantity) || 1)),
+        }));
+    }
+  } catch {
+    items = [];
+  }
+
+  return {
+    id: row.id,
+    items,
+    discountCode: row.discount_code,
+    selectedServiceId: row.selected_service_id,
+    paymentMethod:
+      row.payment_method === 'CASH_ON_PICKUP'
+        ? 'CASH_ON_PICKUP'
+        : row.payment_method === 'PAYPAL'
+        ? 'PAYPAL'
+        : 'STRIPE',
+    notes: row.notes,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+  };
+}
+

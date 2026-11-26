@@ -15,6 +15,7 @@ import {
 import { GalleryItem, PageSeoMetadata, Product, SiteSettings } from '../types';
 import { apiFetch } from '../utils/api';
 import { sanitizeSafeHref } from '../utils/url';
+import { pageSeoAuditEntrySchema, validateWithSchema } from '../validation/schemas';
 
 interface ParsedSitemapEntry {
   loc: string;
@@ -388,8 +389,19 @@ export const SeoAuditSection: React.FC<SeoAuditSectionProps> = ({
 
   const handleSaveRowEdit = async (e: React.FormEvent, row: ResolvedAuditRow) => {
     e.preventDefault();
-    setSavingEdit(true);
     setFetchError(null);
+    const parsed = validateWithSchema(pageSeoAuditEntrySchema, {
+      pageKey: row.pageKey,
+      seoTitle: draftTitle,
+      metaDescription: draftDescription,
+      keywords: draftKeywords,
+    });
+    if (!parsed.success) {
+      setFetchError(parsed.error);
+      return;
+    }
+
+    setSavingEdit(true);
     try {
       const res = await apiFetch<{
         entry: PageSeoMetadata;
@@ -397,12 +409,7 @@ export const SeoAuditSection: React.FC<SeoAuditSectionProps> = ({
         pageSeoMetadata: PageSeoMetadata[];
       }>('/api/admin/seo-audit', {
         method: 'PUT',
-        body: JSON.stringify({
-          pageKey: row.pageKey,
-          seoTitle: draftTitle.trim(),
-          metaDescription: draftDescription.trim(),
-          keywords: draftKeywords.trim(),
-        }),
+        body: JSON.stringify(parsed.data),
       });
       onPageSeoChange(
         res.pageSeoMetadata,

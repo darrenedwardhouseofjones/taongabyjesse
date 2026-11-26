@@ -12,6 +12,7 @@ import {
   Banknote,
   MapPin,
   Gift,
+  Wallet,
 } from 'lucide-react';
 import {
   CartItem,
@@ -91,8 +92,10 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
     .flatMap((c) => c.services.filter((s) => s.isActive));
 
   const stripeEnabled = settings.stripeEnabled ?? true;
+  const paypalEnabled = settings.paypalEnabled ?? true;
   const cashOnPickupEnabled = settings.cashOnPickupEnabled ?? true;
   const isCashOnPickup = paymentMethod === 'CASH_ON_PICKUP';
+  const isPayPal = paymentMethod === 'PAYPAL';
 
   // Compute authoritative prices from SQLite rates, discounts & gift card balance
   const priceSummary = priceCart({
@@ -269,32 +272,45 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                 <span className="text-xs font-semibold text-[#18231C] block">
                   Payment Mode
                 </span>
-                <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#FAF9F6] border border-[#E8E2D6] rounded-xl text-[11px]">
+                <div className="grid grid-cols-3 gap-1.5 p-1 bg-[#FAF9F6] border border-[#E8E2D6] rounded-xl text-[11px]">
                   <button
                     type="button"
                     disabled={!stripeEnabled}
                     onClick={() => onSelectPaymentMethod('STRIPE')}
-                    className={`py-2 px-2.5 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
-                      !isCashOnPickup
+                    className={`py-2 px-2 rounded-lg font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                      !isCashOnPickup && !isPayPal
                         ? 'bg-[#1B382B] text-white shadow-xs'
                         : 'text-[#526058] hover:text-[#18231C]'
                     }`}
                   >
                     <CreditCard className="w-3.5 h-3.5 shrink-0" />
-                    <span>Stripe (Card)</span>
+                    <span>Stripe</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!paypalEnabled}
+                    onClick={() => onSelectPaymentMethod('PAYPAL')}
+                    className={`py-2 px-2 rounded-lg font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                      isPayPal
+                        ? 'bg-[#1B382B] text-white shadow-xs'
+                        : 'text-[#526058] hover:text-[#18231C]'
+                    }`}
+                  >
+                    <Wallet className="w-3.5 h-3.5 shrink-0" />
+                    <span>PayPal</span>
                   </button>
                   <button
                     type="button"
                     disabled={!cashOnPickupEnabled}
                     onClick={() => onSelectPaymentMethod('CASH_ON_PICKUP')}
-                    className={`py-2 px-2.5 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                    className={`py-2 px-2 rounded-lg font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
                       isCashOnPickup
                         ? 'bg-[#1B382B] text-white shadow-xs'
                         : 'text-[#526058] hover:text-[#18231C]'
                     }`}
                   >
                     <Banknote className="w-3.5 h-3.5 shrink-0" />
-                    <span>Cash on Pickup</span>
+                    <span>Pickup</span>
                   </button>
                 </div>
               </div>
@@ -517,7 +533,12 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               {/* Checkout CTA */}
               <button
                 type="button"
-                disabled={!fullyCoveredByGiftCard && !stripeEnabled && !cashOnPickupEnabled}
+                disabled={
+                  !fullyCoveredByGiftCard &&
+                  !stripeEnabled &&
+                  !paypalEnabled &&
+                  !cashOnPickupEnabled
+                }
                 onClick={onProceedToCheckout}
                 className="w-full py-3.5 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] hover:from-[#12241B] hover:to-[#1B382B] disabled:opacity-40 text-white rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md hover:shadow-lg"
               >
@@ -526,6 +547,8 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     ? 'Complete Order with Gift Card ($0.00 Due)'
                     : isCashOnPickup
                     ? 'Proceed to Cash on Pickup Checkout'
+                    : isPayPal
+                    ? 'Proceed to PayPal Secure Checkout'
                     : 'Proceed to Stripe Secure Checkout'}
                 </span>
                 <ArrowRight className="w-4 h-4 text-[#7FA892]" />
@@ -538,6 +561,8 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     ? '100% covered by your Pounamu Atelier digital gift card'
                     : isCashOnPickup
                     ? 'Pay in NZD cash upon collection at our Napier studio'
+                    : isPayPal
+                    ? 'PayPal Buyer Protection · Hosted NZD Checkout'
                     : 'PCI-DSS SAQ A Certified · 256-bit Encrypted Card Processing'}
                 </span>
               </div>

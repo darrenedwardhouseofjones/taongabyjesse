@@ -13,6 +13,8 @@ import {
   MapPin,
   Gift,
   Check,
+  Award,
+  Wallet,
 } from 'lucide-react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import {
@@ -23,6 +25,7 @@ import {
 } from '@stripe/react-stripe-js';
 import {
   CartItem,
+  CertificateRecord,
   CourierRate,
   CourierService,
   DiscountRule,
@@ -36,6 +39,14 @@ import {
 } from '../types';
 import { formatNZD, priceCart } from '../utils/pricing';
 import { apiFetch } from '../utils/api';
+import {
+  cashOnPickupCheckoutSchema,
+  createPaymentIntentSchema,
+  giftCardCheckoutCompleteSchema,
+  validateWithSchema,
+} from '../validation/schemas';
+import { CertificatePrintModal } from './CertificateOfAuthenticity';
+import { PayPalButtonsBox } from './PayPalButtonsBox';
 
 interface CheckoutModalProps {
   isOpen: boolean;
@@ -73,6 +84,20 @@ interface CreatePaymentIntentResponse {
   order: Order;
   clientSecret: string;
   publishableKey: string;
+  pricing: {
+    subtotalCents: number;
+    discountCents: number;
+    shippingCents: number;
+    gstCents: number;
+    totalCents: number;
+  };
+}
+
+interface CreatePayPalOrderResponse {
+  order: Order;
+  paypalOrderId: string;
+  clientId: string;
+  mode: 'sandbox' | 'live';
   pricing: {
     subtotalCents: number;
     discountCents: number;
@@ -278,6 +303,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     'courier' | 'pickup'
   >('courier');
   const [giftCardInput, setGiftCardInput] = useState(giftCardCode);
+  const [certDownloading, setCertDownloading] = useState(false);
+  const [certError, setCertError] = useState<string | null>(null);
+  const [certPreviewModal, setCertPreviewModal] = useState<{
+    orderNumber: string;
+    certificates: CertificateRecord[];
+  } | null>(null);
 
   useEffect(() => {
     setLocalPaymentMethod(paymentMethod);
@@ -288,12 +319,19 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   }, [giftCardCode]);
 
   const stripeEnabled = settings.stripeEnabled ?? true;
+  const paypalEnabled = settings.paypalEnabled ?? true;
   const cashOnPickupEnabled = settings.cashOnPickupEnabled ?? true;
   const activePaymentMethod: PaymentMethod =
     localPaymentMethod === 'CASH_ON_PICKUP' && cashOnPickupEnabled
       ? 'CASH_ON_PICKUP'
+      : localPaymentMethod === 'PAYPAL' && paypalEnabled
+      ? 'PAYPAL'
+      : localPaymentMethod === 'STRIPE' && stripeEnabled
+      ? 'STRIPE'
       : stripeEnabled
       ? 'STRIPE'
+      : paypalEnabled
+      ? 'PAYPAL'
       : cashOnPickupEnabled
       ? 'CASH_ON_PICKUP'
       : 'STRIPE';
@@ -302,7 +340,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     setLocalPaymentMethod(mode);
     onSelectPaymentMethod?.(mode);
     setInitError(null);
-    setStripeNotConfigured(false);
+    setGatewayNotConfigured(false);
   };
 
   // Customer Details Form State (pre-filled only from authenticated profile)
@@ -321,13 +359,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [pickupNotes, setPickupNotes] = useState('');
   const [orderNotes, setOrderNotes] = useState('');
 
-  // PaymentIntent & Order State
+  // PaymentIntent / PayPal & Order State
   const [initializingPayment, setInitializingPayment] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
-  const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
+  const [gatewayNotConfigured, setGatewayNotConfigured] = useState(false);
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [publishableKey, setPublishableKey] = useState<string | null>(null);
+  const [paypalOrderId, setPaypalOrderId] = useState<string | null>(null);
+  const [paypalClientId, setPaypalClientId] = useState<string | null>(null);
+  const [paypalPaymentError, setPaypalPaymentError] = useState<string | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState<string>(() =>
     `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   );
@@ -351,8 +392,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       setCompletedOrder(null);
       setPendingOrder(null);
       setClientSecret(null);
+      setPaypalOrderId(null);
+      setPaypalClientId(null);
+      setPaypalPaymentError(null);
       setInitError(null);
-      setStripeNotConfigured(false);
+      setGatewayNotConfigured(false);
       setOrderNotes('');
       setPickupNotes('');
       setIdempotencyKey(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -449,42 +493,50 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
     setInitializingPayment(true);
     setInitError(null);
-    setStripeNotConfigured(false);
+    setGatewayNotConfigured(false);
+    setPaypalPaymentError(null);
 
     try {
       if (isFullyCoveredByGiftCard) {
+        const parsed = validateWithSchema(giftCardCheckoutCompleteSchema, {
+          items: items.map((i) => ({
+            productId: i.product.id,
+            quantity: i.quantity,
+          })),
+          customerName: fullName,
+          customerEmail: email,
+          customerPhone: phone,
+          fulfillmentMode: fulfillmentWhenCoveredByGiftCard,
+          shippingAddress:
+            fulfillmentWhenCoveredByGiftCard === 'courier'
+              ? {
+                  line1: addressLine1,
+                  line2: addressLine2,
+                  city,
+                  region,
+                  postcode,
+                  country,
+                  isRural,
+                }
+              : undefined,
+          pickupNotes,
+          orderNotes: orderNotes.trim() || undefined,
+          selectedServiceId: selectedService?.id,
+          discountCode,
+          giftCardCode,
+        });
+        if (!parsed.success) {
+          setInitError(parsed.error);
+          setInitializingPayment(false);
+          return;
+        }
+
         const res = await apiFetch<{
           order: Order;
           products?: Product[];
         }>('/api/checkout/gift-card-complete', {
           method: 'POST',
-          body: JSON.stringify({
-            items: items.map((i) => ({
-              productId: i.product.id,
-              quantity: i.quantity,
-            })),
-            customerName: fullName,
-            customerEmail: email,
-            customerPhone: phone,
-            fulfillmentMode: fulfillmentWhenCoveredByGiftCard,
-            shippingAddress:
-              fulfillmentWhenCoveredByGiftCard === 'courier'
-                ? {
-                    line1: addressLine1,
-                    line2: addressLine2,
-                    city,
-                    region,
-                    postcode,
-                    country,
-                    isRural,
-                  }
-                : undefined,
-            pickupNotes,
-            orderNotes: orderNotes.trim() || undefined,
-            selectedServiceId: selectedService?.id,
-            discountCode,
-            giftCardCode,
-          }),
+          body: JSON.stringify(parsed.data),
         });
         setCompletedOrder(res.order);
         setStep('confirmed');
@@ -493,24 +545,31 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       }
 
       if (isCashOnPickup) {
+        const parsed = validateWithSchema(cashOnPickupCheckoutSchema, {
+          items: items.map((i) => ({
+            productId: i.product.id,
+            quantity: i.quantity,
+          })),
+          customerName: fullName,
+          customerEmail: email,
+          customerPhone: phone,
+          pickupNotes,
+          orderNotes: orderNotes.trim() || undefined,
+          discountCode,
+          giftCardCode: giftCardCode || undefined,
+        });
+        if (!parsed.success) {
+          setInitError(parsed.error);
+          setInitializingPayment(false);
+          return;
+        }
+
         const res = await apiFetch<{
           order: Order;
           products?: Product[];
         }>('/api/checkout/cash-on-pickup', {
           method: 'POST',
-          body: JSON.stringify({
-            items: items.map((i) => ({
-              productId: i.product.id,
-              quantity: i.quantity,
-            })),
-            customerName: fullName,
-            customerEmail: email,
-            customerPhone: phone,
-            pickupNotes,
-            orderNotes: orderNotes.trim() || undefined,
-            discountCode,
-            giftCardCode: giftCardCode || undefined,
-          }),
+          body: JSON.stringify(parsed.data),
         });
         setCompletedOrder(res.order);
         setStep('confirmed');
@@ -518,47 +577,79 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         return;
       }
 
+      const parsed = validateWithSchema(createPaymentIntentSchema, {
+        items: items.map((i) => ({
+          productId: i.product.id,
+          quantity: i.quantity,
+        })),
+        customerName: fullName,
+        customerEmail: email,
+        customerPhone: phone,
+        shippingAddress: {
+          line1: addressLine1,
+          line2: addressLine2,
+          city,
+          region,
+          postcode,
+          country,
+          isRural,
+        },
+        orderNotes: orderNotes.trim() || undefined,
+        selectedServiceId: selectedService?.id,
+        discountCode,
+        giftCardCode: giftCardCode || undefined,
+        previousOrderId: pendingOrder?.id,
+        idempotencyKey,
+      });
+      if (!parsed.success) {
+        setInitError(parsed.error);
+        setInitializingPayment(false);
+        return;
+      }
+
+      if (activePaymentMethod === 'PAYPAL') {
+        const res = await apiFetch<CreatePayPalOrderResponse>(
+          '/api/checkout/paypal/create-order',
+          {
+            method: 'POST',
+            body: JSON.stringify(parsed.data),
+          }
+        );
+
+        setPendingOrder(res.order);
+        setPaypalOrderId(res.paypalOrderId);
+        setPaypalClientId(res.clientId);
+        setClientSecret(null);
+        setPublishableKey(null);
+        setStep('payment');
+        return;
+      }
+
       const res = await apiFetch<CreatePaymentIntentResponse>(
         '/api/checkout/create-payment-intent',
         {
           method: 'POST',
-          body: JSON.stringify({
-            items: items.map((i) => ({
-              productId: i.product.id,
-              quantity: i.quantity,
-            })),
-            customerName: fullName,
-            customerEmail: email,
-            customerPhone: phone,
-            shippingAddress: {
-              line1: addressLine1,
-              line2: addressLine2,
-              city,
-              region,
-              postcode,
-              country,
-              isRural,
-            },
-            orderNotes: orderNotes.trim() || undefined,
-            selectedServiceId: selectedService?.id,
-            discountCode,
-            giftCardCode: giftCardCode || undefined,
-            previousOrderId: pendingOrder?.id,
-            idempotencyKey,
-          }),
+          body: JSON.stringify(parsed.data),
         }
       );
 
       setPendingOrder(res.order);
       setClientSecret(res.clientSecret);
       setPublishableKey(res.publishableKey);
+      setPaypalOrderId(null);
+      setPaypalClientId(null);
       setStep('payment');
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Could not initialize secure checkout.';
       setInitError(msg);
-      if (msg.toLowerCase().includes('not configured') || msg.toLowerCase().includes('stripe keys')) {
-        setStripeNotConfigured(true);
+      const lower = msg.toLowerCase();
+      if (
+        lower.includes('not configured') ||
+        lower.includes('stripe keys') ||
+        lower.includes('paypal credentials')
+      ) {
+        setGatewayNotConfigured(true);
       }
     } finally {
       setInitializingPayment(false);
@@ -592,7 +683,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   : isCashOnPickup
                   ? '1. Payment Mode & Napier Studio Pickup Details'
                   : '1. Payment Mode & Shipping Details')}
-              {step === 'payment' && '2. Stripe SAQ A Secure Card Payment'}
+              {step === 'payment' &&
+                (activePaymentMethod === 'PAYPAL'
+                  ? '2. PayPal Secure NZD Checkout'
+                  : '2. Stripe SAQ A Secure Card Payment')}
               {step === 'confirmed' &&
                 (completedOrder?.paymentMethod === 'GIFT_CARD'
                   ? 'Order Paid in Full by Digital Gift Card'
@@ -619,7 +713,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{initError}</span>
                 </div>
-                {stripeNotConfigured &&
+                {gatewayNotConfigured &&
                   currentUser?.role === 'ADMIN' &&
                   onOpenPaymentSettings && (
                     <button
@@ -736,28 +830,52 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             ) : (
               <div className="space-y-2">
                 <div className="font-semibold text-[#18231C]">Select Payment Mode *</div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <button
                     type="button"
                     disabled={!stripeEnabled}
                     onClick={() => handleSelectMode('STRIPE')}
                     className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
-                      !isCashOnPickup
+                      activePaymentMethod === 'STRIPE'
                         ? 'border-[#1B382B] bg-[#F7F9F8] ring-1 ring-[#1B382B]'
                         : 'border-[#E8E2D6] bg-white hover:border-[#1B382B]/50'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-[#18231C] flex items-center gap-2">
+                      <span className="font-bold text-[#18231C] flex items-center gap-1.5">
                         <CreditCard className="w-4 h-4 text-[#1B382B]" />
-                        Stripe Card / Wallet
+                        Stripe Card
                       </span>
                       <span className="text-[10px] font-mono text-[#2D5A46]">
                         {stripeEnabled ? 'Instant' : 'Paused'}
                       </span>
                     </div>
                     <p className="text-[11px] text-[#526058] mt-1">
-                      Pay online via Visa, Mastercard, Apple Pay or Google Pay with tracked courier dispatch.
+                      Visa, Mastercard, Apple Pay or Google Pay with tracked courier.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!paypalEnabled}
+                    onClick={() => handleSelectMode('PAYPAL')}
+                    className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                      activePaymentMethod === 'PAYPAL'
+                        ? 'border-[#1B382B] bg-[#F7F9F8] ring-1 ring-[#1B382B]'
+                        : 'border-[#E8E2D6] bg-white hover:border-[#1B382B]/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-[#18231C] flex items-center gap-1.5">
+                        <Wallet className="w-4 h-4 text-[#1B382B]" />
+                        PayPal
+                      </span>
+                      <span className="text-[10px] font-mono text-[#2D5A46]">
+                        {paypalEnabled ? 'Protected' : 'Paused'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#526058] mt-1">
+                      Pay with your PayPal account, balance, or card in NZD.
                     </p>
                   </button>
 
@@ -766,22 +884,22 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                     disabled={!cashOnPickupEnabled}
                     onClick={() => handleSelectMode('CASH_ON_PICKUP')}
                     className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
-                      isCashOnPickup
+                      activePaymentMethod === 'CASH_ON_PICKUP'
                         ? 'border-[#1B382B] bg-[#F7F9F8] ring-1 ring-[#1B382B]'
                         : 'border-[#E8E2D6] bg-white hover:border-[#1B382B]/50'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-[#18231C] flex items-center gap-2">
+                      <span className="font-bold text-[#18231C] flex items-center gap-1.5">
                         <Banknote className="w-4 h-4 text-[#1B382B]" />
-                        Cash on Pickup
+                        Cash Pickup
                       </span>
                       <span className="text-[10px] font-mono text-[#2D5A46]">
-                        {cashOnPickupEnabled ? '$0 Shipping' : 'Paused'}
+                        {cashOnPickupEnabled ? '$0 Ship' : 'Paused'}
                       </span>
                     </div>
                     <p className="text-[11px] text-[#526058] mt-1">
-                      Reserve online and pay cash (NZD) directly when collecting from our Napier studio.
+                      Reserve online and pay cash (NZD) at our Napier studio.
                     </p>
                   </button>
                 </div>
@@ -1031,9 +1149,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 disabled={
                   initializingPayment ||
                   exportBlocked ||
-                  (!isFullyCoveredByGiftCard && !stripeEnabled && !cashOnPickupEnabled)
+                  (!isFullyCoveredByGiftCard &&
+                    !stripeEnabled &&
+                    !paypalEnabled &&
+                    !cashOnPickupEnabled)
                 }
-                className="px-6 py-2.5 bg-[#1B382B] text-white font-semibold rounded-lg hover:bg-[#12241B] disabled:opacity-50 cursor-pointer flex items-center gap-2"
+                className="w-full sm:w-auto px-6 py-2.5 bg-[#1B382B] text-white font-semibold rounded-lg hover:bg-[#12241B] disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
               >
                 {initializingPayment ? (
                   <>
@@ -1043,6 +1164,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                         ? 'Completing Gift Card Order...'
                         : isCashOnPickup
                         ? 'Confirming Studio Pickup...'
+                        : activePaymentMethod === 'PAYPAL'
+                        ? 'Reserving & Preparing PayPal...'
                         : 'Reserving & Preparing Stripe...'}
                     </span>
                   </>
@@ -1052,6 +1175,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       ? 'Complete Gift Card Order ($0.00 NZD Due)'
                       : isCashOnPickup
                       ? `Confirm Cash on Pickup Order (${formatNZD(livePricing.totalCents)})`
+                      : activePaymentMethod === 'PAYPAL'
+                      ? `Continue to PayPal Checkout (${formatNZD(livePricing.totalCents)})`
                       : `Continue to Stripe Payment (${formatNZD(livePricing.totalCents)})`}
                   </span>
                 )}
@@ -1060,8 +1185,150 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           </form>
         )}
 
-        {/* STEP 2: REAL STRIPE HOSTED PAYMENT ELEMENT (SAQ A) */}
-        {step === 'payment' && pendingOrder && clientSecret && stripePromise && (
+        {/* STEP 2A: REAL PAYPAL HOSTED SMART PAYMENT BUTTONS */}
+        {step === 'payment' &&
+          pendingOrder &&
+          activePaymentMethod === 'PAYPAL' &&
+          paypalOrderId &&
+          paypalClientId && (
+            <div className="p-6 space-y-5 text-xs font-sans-ui">
+              <div className="p-3.5 bg-[#2D5A46]/10 border border-[#2D5A46]/30 rounded-xl flex items-start gap-3">
+                <ShieldCheck className="w-5 h-5 text-[#2D5A46] shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-[#1B382B]">
+                    PayPal Buyer Protection · Order {pendingOrder.orderNumber}
+                  </div>
+                  <div className="text-[11px] text-[#526058]">
+                    Your payment is authorized directly in PayPal’s hosted checkout. Totals are locked server-side in NZD and unique stone stock is reserved for 15 minutes.
+                  </div>
+                </div>
+              </div>
+
+              {/* Total summary (authoritative server calculation) */}
+              <div className="p-4 bg-[#FAF9F6] rounded-xl border border-[#E8E2D6] space-y-1 text-xs">
+                <div className="flex justify-between">
+                  <span>Items Subtotal:</span>
+                  <span className="font-mono">
+                    {formatNZD(displaySubtotal + (pendingOrder.discountCents ?? discountCents))}
+                  </span>
+                </div>
+                {(pendingOrder.discountCents ?? discountCents) > 0 && (
+                  <div className="flex justify-between text-[#2D5A46]">
+                    <span>Discount:</span>
+                    <span className="font-mono">
+                      -{formatNZD(pendingOrder.discountCents ?? discountCents)}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span>Insured Courier ({pendingOrder.courierName}):</span>
+                  <span className="font-mono">
+                    {displayShipping === 0 ? 'FREE' : formatNZD(displayShipping)}
+                  </span>
+                </div>
+                {displayGiftCardApplied > 0 && (
+                  <div className="flex justify-between text-[#2D5A46] font-medium">
+                    <span>Gift Card ({pendingOrder.giftCardCode || giftCardCode}):</span>
+                    <span className="font-mono">-{formatNZD(displayGiftCardApplied)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-[11px] text-[#526058]">
+                  <span>GST (15% included):</span>
+                  <span className="font-mono">{formatNZD(displayGst)}</span>
+                </div>
+                <div className="flex justify-between text-base font-bold text-[#1B382B] pt-2 border-t border-[#E8E2D6]">
+                  <span>Authoritative Charge Total:</span>
+                  <span className="tabular-nums font-mono">{formatNZD(displayTotal)}</span>
+                </div>
+              </div>
+
+              {paypalPaymentError && (
+                <div className="p-3 rounded-xl bg-[#A63A2A]/10 border border-[#A63A2A]/30 text-[#A63A2A] flex items-start gap-2 text-xs font-medium">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{paypalPaymentError}</span>
+                </div>
+              )}
+
+              <div className="p-4 sm:p-5 border border-[#E8E2D6] rounded-xl bg-white space-y-3">
+                <div className="flex items-center justify-between text-[#526058] pb-2 border-b border-[#E8E2D6]">
+                  <span className="font-semibold text-[#18231C] flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-[#1B382B]" />
+                    PayPal Checkout (NZD)
+                  </span>
+                  <span
+                    className={`text-[10px] uppercase font-mono font-bold px-2 py-0.5 rounded ${
+                      settings.paypalMode === 'live'
+                        ? 'bg-[#2D5A46]/15 text-[#2D5A46]'
+                        : 'bg-[#C29B38]/15 text-[#9A7820]'
+                    }`}
+                  >
+                    {settings.paypalMode === 'live' ? 'Live Mode' : 'Sandbox Mode'}
+                  </span>
+                </div>
+
+                <PayPalButtonsBox
+                  clientId={paypalClientId}
+                  createPayPalOrderId={() => paypalOrderId}
+                  onApprovePayPalOrder={async (approvedPpId) => {
+                    setPaypalPaymentError(null);
+                    const finalRes = await apiFetch<{
+                      status: Order['status'];
+                      order: Order;
+                      products?: Product[];
+                    }>('/api/checkout/paypal/capture-order', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        orderId: pendingOrder.id,
+                        paypalOrderId: approvedPpId,
+                      }),
+                    });
+                    setCompletedOrder(finalRes.order);
+                    setStep('confirmed');
+                    onOrderComplete(finalRes.order, finalRes.products);
+                  }}
+                  onCancel={() => {
+                    setPaypalPaymentError('PayPal window was closed before completing payment.');
+                  }}
+                  onError={(msg) => setPaypalPaymentError(msg)}
+                />
+              </div>
+
+              <div className="flex justify-between items-center pt-1">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await apiFetch('/api/checkout/paypal/cancel-order', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          orderId: pendingOrder.id,
+                          paypalOrderId,
+                        }),
+                      });
+                    } catch {
+                      // Ignore best-effort release failure
+                    }
+                    setPendingOrder(null);
+                    setPaypalOrderId(null);
+                    setPaypalClientId(null);
+                    setPaypalPaymentError(null);
+                    setIdempotencyKey(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+                    setStep('details');
+                  }}
+                  className="text-[#526058] hover:text-[#18231C] cursor-pointer"
+                >
+                  ← Back to Details
+                </button>
+              </div>
+            </div>
+          )}
+
+        {/* STEP 2B: REAL STRIPE HOSTED PAYMENT ELEMENT (SAQ A) */}
+        {step === 'payment' &&
+          pendingOrder &&
+          activePaymentMethod === 'STRIPE' &&
+          clientSecret &&
+          stripePromise && (
           <div className="p-6 space-y-5 text-xs font-sans-ui">
             {/* SAQ A Trust Banner */}
             <div className="p-3.5 bg-[#2D5A46]/10 border border-[#2D5A46]/30 rounded-xl flex items-start gap-3">
@@ -1175,6 +1442,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       {confirmationEmailLog?.recipientEmail || currentUser?.email || completedOrder.customerEmail}
                     </strong>.
                   </>
+                ) : completedOrder.paymentMethod === 'PAYPAL' ? (
+                  <>
+                    Your sacred taonga has been reserved and your PayPal payment is confirmed. A tax invoice and provenance record have been prepared for{' '}
+                    <strong>
+                      {confirmationEmailLog?.recipientEmail || currentUser?.email || completedOrder.customerEmail}
+                    </strong>.
+                  </>
                 ) : (
                   <>
                     Your sacred taonga has been reserved and your Stripe payment is confirmed. A tax invoice and provenance record have been prepared for{' '}
@@ -1220,6 +1494,8 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                       ? `Gift Card (${completedOrder.giftCardCode})`
                       : completedOrder.paymentMethod === 'CASH_ON_PICKUP'
                       ? 'Cash on Pickup'
+                      : completedOrder.paymentMethod === 'PAYPAL'
+                      ? `PayPal: ${completedOrder.paypalCaptureId || completedOrder.paypalOrderId || ''}`
                       : completedOrder.stripePaymentIntentId}
                   </div>
                 </div>
@@ -1241,8 +1517,21 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                         Ngāi Tahu Code: {item.authenticityCode} ({item.originRiver})
                       </div>
                       <div className="text-[10px] text-[#526058]">
-                        Carved by Jesse · {item.material} Pounamu
+                        Carved by {item.carverName || 'Jesse'} · {item.material} Pounamu
                       </div>
+                      {item.certificateNumbers && item.certificateNumbers.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {item.certificateNumbers.map((cn) => (
+                            <span
+                              key={cn}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#1B382B]/10 text-[#1B382B] font-mono text-[9px] font-semibold"
+                            >
+                              <Award className="w-2.5 h-2.5 text-[#C29B38]" />
+                              {cn}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="font-mono font-bold text-[#1B382B]">
                       {formatNZD(item.priceCents * item.quantity)}
@@ -1341,15 +1630,55 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               </div>
             </div>
 
-            <div className="flex justify-between items-center pt-2">
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="px-4 py-2 border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] rounded-lg flex items-center gap-2 cursor-pointer"
-              >
-                <Printer className="w-4 h-4" />
-                <span>Print Packing Slip & Invoice</span>
-              </button>
+            {certError && (
+              <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-900 text-[11px]">
+                {certError}
+              </div>
+            )}
+
+            <div className="flex flex-wrap justify-between items-center gap-2 pt-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-4 py-2 border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] rounded-lg flex items-center gap-2 cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print Packing Slip & Invoice</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={certDownloading}
+                  onClick={async () => {
+                    if (!completedOrder || certDownloading) return;
+                    setCertDownloading(true);
+                    setCertError(null);
+                    try {
+                      const res = await apiFetch<{ certificates: CertificateRecord[] }>(
+                        `/api/orders/${encodeURIComponent(
+                          completedOrder.id
+                        )}/certificates?email=${encodeURIComponent(completedOrder.customerEmail)}`
+                      );
+                      setCertPreviewModal({
+                        orderNumber: completedOrder.orderNumber,
+                        certificates: res.certificates || [],
+                      });
+                    } catch (err) {
+                      setCertError(
+                        err instanceof Error
+                          ? err.message
+                          : 'Unable to load certificate card.'
+                      );
+                    } finally {
+                      setCertDownloading(false);
+                    }
+                  }}
+                  className="px-4 py-2 border border-[#1B382B] bg-white text-[#1B382B] hover:bg-[#FAF9F6] rounded-lg font-semibold flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <Award className="w-4 h-4 text-[#C29B38]" />
+                  <span>{certDownloading ? 'Loading...' : 'Certificate Card'}</span>
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={onClose}
@@ -1361,6 +1690,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           </div>
         )}
       </div>
+
+      <CertificatePrintModal
+        isOpen={Boolean(certPreviewModal)}
+        onClose={() => setCertPreviewModal(null)}
+        certificates={certPreviewModal?.certificates || []}
+        settings={settings}
+        orderNumber={certPreviewModal?.orderNumber}
+      />
     </div>
   );
 };

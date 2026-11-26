@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navbar, AppTab, DashboardSection } from './components/Navbar';
 import { StorefrontView } from './components/StorefrontView';
 import { GalleryView, WishlistToggleInput } from './components/GalleryView';
@@ -80,34 +80,125 @@ const POLICY_SECTIONS: PolicySectionKey[] = [
   'authenticity',
 ];
 
+interface BrowserModelContextTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  execute: (input: Record<string, unknown>) => Promise<unknown> | unknown;
+}
+
+interface NavigatorWithModelContext extends Navigator {
+  modelContext?: {
+    registerTool?: (tool: BrowserModelContextTool) => void;
+    unregisterTool?: (name: string) => void;
+  };
+}
+
 function getInitialUrlParams(): {
   tab: AppTab;
   productId: string | null;
   pieceId: string | null;
+  certCode: string | null;
   policySection: PolicySectionKey;
+  searchQuery: string;
+  variety: string;
+  motif: string;
+  addProductId: string | null;
+  addQty: number;
+  itemsParam: string | null;
+  agentCartId: string | null;
+  promoCode: string | null;
+  serviceId: string | null;
+  openCart: boolean;
+  openCheckout: boolean;
 } {
   if (typeof window === 'undefined') {
-    return { tab: 'store', productId: null, pieceId: null, policySection: 'terms' };
+    return {
+      tab: 'store',
+      productId: null,
+      pieceId: null,
+      certCode: null,
+      policySection: 'terms',
+      searchQuery: '',
+      variety: 'All',
+      motif: 'All',
+      addProductId: null,
+      addQty: 1,
+      itemsParam: null,
+      agentCartId: null,
+      promoCode: null,
+      serviceId: null,
+      openCart: false,
+      openCheckout: false,
+    };
   }
   const params = new URLSearchParams(window.location.search);
   const rawTab = params.get('tab') as AppTab | null;
   const productId = params.get('product');
   const pieceId = params.get('piece');
+  const rawCert = params.get('cert') || params.get('code');
+  const certCode = rawCert ? rawCert.trim().toUpperCase() : null;
   const rawDoc = params.get('doc') as PolicySectionKey | null;
   let tab: AppTab = rawTab && PUBLIC_TABS.includes(rawTab) ? rawTab : 'store';
   if (!rawTab && pieceId) tab = 'gallery';
+  if (!rawTab && certCode) tab = 'provenance';
   const policySection: PolicySectionKey =
     rawDoc && POLICY_SECTIONS.includes(rawDoc) ? rawDoc : 'terms';
-  return { tab, productId, pieceId, policySection };
+
+  const searchQuery = params.get('q')?.trim() || '';
+  const variety = params.get('variety')?.trim() || 'All';
+  const motif = params.get('motif')?.trim() || 'All';
+  const addProductId = params.get('add')?.trim() || null;
+  const parsedQty = Number(params.get('qty') || '1');
+  const addQty = Number.isFinite(parsedQty) && parsedQty >= 1 ? Math.floor(parsedQty) : 1;
+  const itemsParam = params.get('items')?.trim() || null;
+  const agentCartId = params.get('agentCart')?.trim() || null;
+  const promoCode = params.get('promo')?.trim().toUpperCase() || null;
+  const serviceId = params.get('service')?.trim() || null;
+  const cartFlag = params.get('cart');
+  const checkoutFlag = params.get('checkout');
+  const openCart = cartFlag === '1' || cartFlag === 'true';
+  const openCheckout = checkoutFlag === '1' || checkoutFlag === 'true';
+
+  if (!rawTab && (addProductId || itemsParam || agentCartId || searchQuery || openCart || openCheckout)) {
+    tab = 'store';
+  }
+
+  return {
+    tab,
+    productId,
+    pieceId,
+    certCode,
+    policySection,
+    searchQuery,
+    variety,
+    motif,
+    addProductId,
+    addQty,
+    itemsParam,
+    agentCartId,
+    promoCode,
+    serviceId,
+    openCart,
+    openCheckout,
+  };
 }
 
 export default function App() {
-  const initialUrl = getInitialUrlParams();
+  const [initialUrl] = useState(() => getInitialUrlParams());
   const [currentTab, setCurrentTab] = useState<AppTab>(initialUrl.tab);
   const [policySection, setPolicySection] = useState<PolicySectionKey>(initialUrl.policySection);
   const [initialProductId, setInitialProductId] = useState<string | null>(initialUrl.productId);
+  const [initialSearchQuery] = useState<string>(initialUrl.searchQuery);
+  const [initialVariety] = useState<string>(initialUrl.variety);
+  const [initialMotif] = useState<string>(initialUrl.motif);
+  const [activeStoreProduct, setActiveStoreProduct] = useState<Product | null>(null);
   const [initialPieceId, setInitialPieceId] = useState<string | null>(initialUrl.pieceId);
+  const [initialProvenanceCode, setInitialProvenanceCode] = useState<string | null>(
+    initialUrl.certCode
+  );
   const [dashboardSection, setDashboardSection] = useState<DashboardSection>('client-orders');
+  const agentHydratedRef = useRef<boolean>(false);
 
   // Bootstrap status
   const [bootstrapStatus, setBootstrapStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -217,21 +308,199 @@ export default function App() {
     void loadBootstrap(true);
   }, [loadBootstrap]);
 
-  // Dynamic Favicon, Document Title, SEO Meta Tags & Open Graph Synchronization
+  // Dynamic Favicon, Document Title, SEO Meta Tags & Rich Schema.org Product/Action JSON-LD
   useEffect(() => {
-    applySiteSeoToHead(settings, pageSeoMetadata);
-  }, [settings, pageSeoMetadata, currentTab]);
+    applySiteSeoToHead(
+      settings,
+      pageSeoMetadata,
+      products,
+      activeStoreProduct?.id || initialProductId
+    );
+  }, [settings, pageSeoMetadata, products, activeStoreProduct, initialProductId, currentTab]);
+
+  // Hydrate AI Search / Agent Deep-Link Cart & Checkout Params once SQLite bootstrap finishes
+  useEffect(() => {
+    if (bootstrapStatus !== 'ready' || agentHydratedRef.current) return;
+    const {
+      agentCartId,
+      addProductId,
+      addQty,
+      itemsParam,
+      promoCode,
+      serviceId,
+      openCart,
+      openCheckout,
+    } = initialUrl;
+
+    const hasAgentCommerceAction = Boolean(
+      agentCartId || addProductId || itemsParam || openCart || openCheckout
+    );
+    if (!hasAgentCommerceAction) return;
+    agentHydratedRef.current = true;
+
+    const cleanUrlQueryParams = () => {
+      if (typeof window === 'undefined') return;
+      const nextParams = new URLSearchParams(window.location.search);
+      ['add', 'qty', 'items', 'agentCart', 'cart', 'checkout'].forEach((k) =>
+        nextParams.delete(k)
+      );
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', nextUrl);
+    };
+
+    if (agentCartId) {
+      void (async () => {
+        try {
+          const data = await apiFetch<{
+            agentCart: {
+              discountCode: string;
+              selectedServiceId: string;
+              paymentMethod: PaymentMethod;
+            };
+            cartItems: { product: Product; quantity: number }[];
+            unavailableItems: { productId: string; reason: string }[];
+          }>(`/api/agent/cart/${encodeURIComponent(agentCartId)}`);
+
+          if (data.cartItems && data.cartItems.length > 0) {
+            const expiry = Date.now() + 15 * 60 * 1000;
+            setCartItems(
+              data.cartItems.map((ci) => ({
+                product: ci.product,
+                quantity: ci.quantity,
+                reservationExpiresAt: expiry,
+              }))
+            );
+            if (data.agentCart.discountCode) {
+              setDiscountCode(data.agentCart.discountCode);
+            }
+            if (data.agentCart.selectedServiceId) {
+              setSelectedServiceId(data.agentCart.selectedServiceId);
+            }
+            if (data.agentCart.paymentMethod) {
+              setSelectedPaymentMethod(data.agentCart.paymentMethod);
+            }
+            if (openCheckout) {
+              setIsCartOpen(false);
+              setIsCheckoutOpen(true);
+            } else {
+              setIsCartOpen(true);
+            }
+            showWishlistNotice(
+              `Loaded curated selection (${data.cartItems.length} piece${data.cartItems.length === 1 ? '' : 's'}) ready for checkout.`
+            );
+          } else if (data.unavailableItems?.[0]) {
+            showWishlistNotice(data.unavailableItems[0].reason);
+          }
+        } catch (err) {
+          showWishlistNotice(
+            err instanceof Error ? err.message : 'Unable to load the requested agent cart session.'
+          );
+        } finally {
+          cleanUrlQueryParams();
+        }
+      })();
+      return;
+    }
+
+    const requestedPairs: { productId: string; quantity: number }[] = [];
+    if (addProductId) {
+      requestedPairs.push({ productId: addProductId, quantity: addQty });
+    }
+    if (itemsParam) {
+      for (const token of itemsParam.split(',')) {
+        const [rawId, rawCount] = token.split(':');
+        const pid = rawId?.trim();
+        if (!pid) continue;
+        const q = Number(rawCount || '1');
+        requestedPairs.push({
+          productId: pid,
+          quantity: Number.isFinite(q) && q >= 1 ? Math.floor(q) : 1,
+        });
+      }
+    }
+
+    if (requestedPairs.length > 0 && products.length > 0) {
+      const nextItems: CartItem[] = [];
+      const expiry = Date.now() + 15 * 60 * 1000;
+
+      for (const reqLine of requestedPairs) {
+        const match = products.find(
+          (p) =>
+            p.published &&
+            (p.id === reqLine.productId ||
+              p.sku.toLowerCase() === reqLine.productId.toLowerCase() ||
+              p.slug.toLowerCase() === reqLine.productId.toLowerCase())
+        );
+        if (!match) continue;
+        if (!match.isMadeToOrder && match.quantity <= 0) continue;
+
+        const existing = nextItems.find((i) => i.product.id === match.id);
+        if (existing) {
+          if (match.isUniquePiece) continue;
+          const combined = existing.quantity + reqLine.quantity;
+          existing.quantity = match.isMadeToOrder
+            ? combined
+            : Math.min(combined, match.quantity);
+        } else {
+          const initialQty = match.isUniquePiece
+            ? 1
+            : match.isMadeToOrder
+            ? reqLine.quantity
+            : Math.min(reqLine.quantity, match.quantity);
+          nextItems.push({
+            product: match,
+            quantity: initialQty,
+            reservationExpiresAt: expiry,
+          });
+        }
+      }
+
+      if (nextItems.length > 0) {
+        setCartItems(nextItems);
+        if (promoCode) setDiscountCode(promoCode);
+        if (serviceId) setSelectedServiceId(serviceId);
+        if (openCheckout) {
+          setIsCartOpen(false);
+          setIsCheckoutOpen(true);
+        } else {
+          setIsCartOpen(true);
+        }
+        showWishlistNotice(
+          `Added ${nextItems.length} piece${nextItems.length === 1 ? '' : 's'} to your cart.`
+        );
+      } else {
+        showWishlistNotice('The requested piece is currently unavailable or sold out.');
+      }
+    } else if (openCheckout) {
+      setIsCheckoutOpen(true);
+    } else if (openCart) {
+      setIsCartOpen(true);
+    }
+
+    cleanUrlQueryParams();
+  }, [bootstrapStatus, products, initialUrl, showWishlistNotice]);
 
   // Keep selected payment method valid if admin disables one mode
   useEffect(() => {
     const stripeOn = settings.stripeEnabled ?? true;
+    const paypalOn = settings.paypalEnabled ?? true;
     const cashOn = settings.cashOnPickupEnabled ?? true;
-    if (selectedPaymentMethod === 'STRIPE' && !stripeOn && cashOn) {
-      setSelectedPaymentMethod('CASH_ON_PICKUP');
-    } else if (selectedPaymentMethod === 'CASH_ON_PICKUP' && !cashOn && stripeOn) {
-      setSelectedPaymentMethod('STRIPE');
+    const isCurrentValid =
+      (selectedPaymentMethod === 'STRIPE' && stripeOn) ||
+      (selectedPaymentMethod === 'PAYPAL' && paypalOn) ||
+      (selectedPaymentMethod === 'CASH_ON_PICKUP' && cashOn);
+    if (!isCurrentValid) {
+      if (stripeOn) setSelectedPaymentMethod('STRIPE');
+      else if (paypalOn) setSelectedPaymentMethod('PAYPAL');
+      else if (cashOn) setSelectedPaymentMethod('CASH_ON_PICKUP');
     }
-  }, [settings.stripeEnabled, settings.cashOnPickupEnabled, selectedPaymentMethod]);
+  }, [
+    settings.stripeEnabled,
+    settings.paypalEnabled,
+    settings.cashOnPickupEnabled,
+    selectedPaymentMethod,
+  ]);
 
   // Auth Handlers
   const handleAuthSuccess = async (payload: {
@@ -410,6 +679,157 @@ export default function App() {
       })
     );
   };
+
+  // WebMCP / Browser AI Agent Tool Registration (when supported by the host browser)
+  const webMcpStateRef = useRef({
+    products,
+    cartItems,
+    handleAddToCart,
+  });
+  webMcpStateRef.current = {
+    products,
+    cartItems,
+    handleAddToCart,
+  };
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined') return;
+    const navWithContext = navigator as NavigatorWithModelContext;
+    const modelContext = navWithContext.modelContext;
+    if (!modelContext?.registerTool) return;
+
+    const toolNames = ['search_taonga', 'add_to_cart', 'open_checkout'];
+    try {
+      modelContext.registerTool({
+        name: 'search_taonga',
+        description:
+          'Search in-stock New Zealand Pounamu (greenstone) pieces by keyword, material variety, design motif, or maximum NZD price.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Keyword such as Toki, Koru, Kawakawa, or river name' },
+            material: { type: 'string', description: 'Stone variety such as Kawakawa, Kahurangi, Inanga, or Tangiwai' },
+            maxPriceNzd: { type: 'number', description: 'Optional maximum price in NZD' },
+          },
+        },
+        execute: (input) => {
+          const q = typeof input.query === 'string' ? input.query.trim().toLowerCase() : '';
+          const mat = typeof input.material === 'string' ? input.material.trim().toLowerCase() : '';
+          const maxPriceCents =
+            typeof input.maxPriceNzd === 'number' && Number.isFinite(input.maxPriceNzd)
+              ? Math.round(input.maxPriceNzd * 100)
+              : undefined;
+
+          const matches = webMcpStateRef.current.products
+            .filter((p) => {
+              if (!p.published || (!p.isMadeToOrder && p.quantity <= 0)) return false;
+              if (mat && !p.material.toLowerCase().includes(mat)) return false;
+              if (typeof maxPriceCents === 'number' && p.priceCents > maxPriceCents) return false;
+              if (q) {
+                const hay = `${p.title} ${p.material} ${p.designType} ${p.originRiver} ${p.description}`.toLowerCase();
+                if (!hay.includes(q)) return false;
+              }
+              return true;
+            })
+            .map((p) => ({
+              id: p.id,
+              sku: p.sku,
+              title: p.title,
+              material: p.material,
+              designType: p.designType,
+              priceNzd: Number((p.priceCents / 100).toFixed(2)),
+              isUniquePiece: p.isUniquePiece,
+              availableQuantity: p.isMadeToOrder ? null : p.quantity,
+              authenticityCode: p.authenticityCode,
+            }));
+          return { count: matches.length, products: matches };
+        },
+      });
+
+      modelContext.registerTool({
+        name: 'add_to_cart',
+        description: 'Add a Pounamu product to the customer cart by productId and optionally open the cart drawer.',
+        inputSchema: {
+          type: 'object',
+          required: ['productId'],
+          properties: {
+            productId: { type: 'string' },
+            quantity: { type: 'integer', minimum: 1, default: 1 },
+            openCart: { type: 'boolean', default: true },
+          },
+        },
+        execute: (input) => {
+          const pid = typeof input.productId === 'string' ? input.productId.trim() : '';
+          const qty =
+            typeof input.quantity === 'number' && Number.isFinite(input.quantity) && input.quantity >= 1
+              ? Math.floor(input.quantity)
+              : 1;
+          const product = webMcpStateRef.current.products.find(
+            (p) => p.id === pid && p.published
+          );
+          if (!product) {
+            return { ok: false, error: `Product "${pid}" not found.` };
+          }
+          if (!product.isMadeToOrder && product.quantity <= 0) {
+            return { ok: false, error: `"${product.title}" is sold out.` };
+          }
+          const addCount = product.isUniquePiece ? 1 : qty;
+          for (let i = 0; i < addCount; i++) {
+            webMcpStateRef.current.handleAddToCart(product);
+          }
+          if (input.openCart !== false) {
+            setIsCartOpen(true);
+          }
+          return { ok: true, addedProductId: product.id, title: product.title };
+        },
+      });
+
+      modelContext.registerTool({
+        name: 'open_checkout',
+        description: 'Open the secure Stripe, PayPal, or Studio Pickup checkout modal so the user can review shipping and pay.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            productId: {
+              type: 'string',
+              description: 'Optional productId to add immediately before opening checkout',
+            },
+          },
+        },
+        execute: (input) => {
+          const pid = typeof input.productId === 'string' ? input.productId.trim() : '';
+          if (pid) {
+            const product = webMcpStateRef.current.products.find(
+              (p) => p.id === pid && p.published && (p.isMadeToOrder || p.quantity > 0)
+            );
+            if (!product) {
+              return { ok: false, error: `Product "${pid}" is unavailable.` };
+            }
+            webMcpStateRef.current.handleAddToCart(product);
+          } else if (webMcpStateRef.current.cartItems.length === 0) {
+            return { ok: false, error: 'Cart is empty. Add a product first or pass productId.' };
+          }
+          setIsCartOpen(false);
+          setIsCheckoutOpen(true);
+          return { ok: true, status: 'checkout_modal_opened' };
+        },
+      });
+    } catch {
+      // Ignore if host browser restricts modelContext registration
+    }
+
+    return () => {
+      if (modelContext?.unregisterTool) {
+        toolNames.forEach((name) => {
+          try {
+            modelContext.unregisterTool?.(name);
+          } catch {
+            // Ignore cleanup errors
+          }
+        });
+      }
+    };
+  }, []);
 
   // Authoritative Pricing calculation from SQLite couriers, rates & discounts
   const allServices = couriers
@@ -922,7 +1342,11 @@ export default function App() {
             wishlist={wishlist}
             currentUser={currentUser}
             initialProductId={initialProductId}
+            initialSearchQuery={initialSearchQuery}
+            initialVariety={initialVariety}
+            initialMotif={initialMotif}
             onClearInitialProduct={() => setInitialProductId(null)}
+            onActiveProductChange={setActiveStoreProduct}
             onAddToCart={handleAddToCart}
             onToggleWishlist={handleToggleWishlist}
             onOpenCustom={() => setCurrentTab('custom')}
@@ -968,7 +1392,14 @@ export default function App() {
           />
         )}
 
-        {currentTab === 'provenance' && <ProvenanceView products={products} />}
+        {currentTab === 'provenance' && (
+          <ProvenanceView
+            products={products}
+            settings={settings}
+            initialCode={initialProvenanceCode}
+            onClearInitialCode={() => setInitialProvenanceCode(null)}
+          />
+        )}
 
         {currentTab === 'gift-cards' && (
           <GiftCardsView

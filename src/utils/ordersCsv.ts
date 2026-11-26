@@ -28,7 +28,7 @@ export function buildOrdersCsv(orders: Order[]): string {
     'Shipping (NZD)',
     'GST Included (NZD)',
     'Total (NZD)',
-    'Stripe Fee (NZD)',
+    'Gateway Fee (NZD)',
     'Net Received (NZD)',
     'Refunded (NZD)',
     'Item Count',

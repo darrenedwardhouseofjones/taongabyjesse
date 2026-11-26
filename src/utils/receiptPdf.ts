@@ -65,6 +65,7 @@ export function generateOrderReceiptPdf(order: Order, settings: SiteSettings): v
 
   const isCashOnPickup = order.paymentMethod === 'CASH_ON_PICKUP';
   const isGiftCardOnly = order.paymentMethod === 'GIFT_CARD';
+  const isPayPal = order.paymentMethod === 'PAYPAL';
   const isCashCollected = order.paymentStatus === 'PAID' || order.status === 'DELIVERED';
   const hasCourierDelivery = order.courierName !== 'Studio Pickup';
 
@@ -122,14 +123,22 @@ export function generateOrderReceiptPdf(order: Order, settings: SiteSettings): v
     ? `Digital Gift Card (${order.giftCardCode || '100% Covered'})`
     : isCashOnPickup
     ? `Cash on Pickup (${isCashCollected ? 'Paid' : 'Due on Pickup'})`
+    : isPayPal
+    ? order.giftCardAppliedCents
+      ? `PayPal Checkout + Gift Card (${order.giftCardCode})`
+      : 'PayPal Checkout'
     : order.giftCardAppliedCents
     ? `Stripe Card + Gift Card (${order.giftCardCode})`
     : 'Stripe Card / Wallet';
 
+  const paymentRef = isPayPal
+    ? order.paypalCaptureId || order.paypalOrderId
+    : order.stripePaymentIntentId;
+
   const metaLines = [
     `Receipt Date: ${orderDateStr}`,
     `Payment Mode: ${paymentModeLabel}`,
-    ...(order.stripePaymentIntentId ? [`Payment Ref: ${order.stripePaymentIntentId}`] : []),
+    ...(paymentRef ? [`Payment Ref: ${paymentRef}`] : []),
     `Fulfilment: ${
       !hasCourierDelivery ? 'Napier Studio Collection' : `${order.courierName} (${order.courierServiceName})`
     }`,
@@ -180,7 +189,16 @@ export function generateOrderReceiptPdf(order: Order, settings: SiteSettings): v
       margin + 3,
       y + 4.5
     );
-    doc.text('Hand-carved by Jesse (Napier, NZ)', margin + 3, y + 9);
+    doc.text(`Hand-carved by ${toPdfSafeText(item.carverName || 'Jesse')} (Napier, NZ)`, margin + 3, y + 9);
+    const certList = item.certificateNumbers?.length
+      ? `Cert #: ${item.certificateNumbers.join(', ')}`
+      : null;
+    if (certList) {
+      doc.setFont('courier', 'bold');
+      doc.setFontSize(7.8);
+      doc.setTextColor(27, 56, 43);
+      doc.text(toPdfSafeText(certList), margin + 3, y + 13.2);
+    }
 
     doc.setFont('courier', 'bold');
     doc.setFontSize(8.5);
@@ -197,7 +215,7 @@ export function generateOrderReceiptPdf(order: Order, settings: SiteSettings): v
       align: 'right',
     });
 
-    y += 14;
+    y += certList ? 18 : 14;
     doc.setDrawColor(232, 226, 214);
     doc.line(margin, y - 2, pageWidth - margin, y - 2);
     y += 2;

@@ -14,6 +14,7 @@ import {
   MapPin,
   ArrowRight,
   Settings,
+  Wallet,
 } from 'lucide-react';
 import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import {
@@ -30,6 +31,12 @@ import {
 } from '../types';
 import { formatNZD } from '../utils/pricing';
 import { apiFetch } from '../utils/api';
+import {
+  giftCardPurchaseSchema,
+  giftCardValidateQuerySchema,
+  validateWithSchema,
+} from '../validation/schemas';
+import { PayPalButtonsBox } from './PayPalButtonsBox';
 
 interface GiftCardsViewProps {
   settings: SiteSettings;
@@ -160,13 +167,14 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
   onOpenPaymentSettings,
 }) => {
   const stripeEnabled = settings.stripeEnabled ?? true;
+  const paypalEnabled = settings.paypalEnabled ?? true;
   const cashOnPickupEnabled = settings.cashOnPickupEnabled ?? true;
 
   // Purchase Configuration State
   const [selectedPresetCents, setSelectedPresetCents] = useState<number | 'custom'>(10000);
   const [customNzd, setCustomNzd] = useState('150');
-  const [paymentMode, setPaymentMode] = useState<'STRIPE' | 'CASH_ON_PICKUP'>(
-    stripeEnabled ? 'STRIPE' : 'CASH_ON_PICKUP'
+  const [paymentMode, setPaymentMode] = useState<'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP'>(
+    stripeEnabled ? 'STRIPE' : paypalEnabled ? 'PAYPAL' : 'CASH_ON_PICKUP'
   );
   const [purchaserName, setPurchaserName] = useState(
     currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : ''
@@ -186,12 +194,19 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
   // Checkout / Issuance State
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [stripeNotConfigured, setStripeNotConfigured] = useState(false);
+  const [gatewayNotConfigured, setGatewayNotConfigured] = useState(false);
   const [stripeSession, setStripeSession] = useState<{
     giftCard: GiftCard;
     clientSecret: string;
     publishableKey: string;
   } | null>(null);
+  const [paypalSession, setPaypalSession] = useState<{
+    giftCard: GiftCard;
+    paypalOrderId: string;
+    clientId: string;
+    mode: 'sandbox' | 'live';
+  } | null>(null);
+  const [paypalError, setPaypalError] = useState<string | null>(null);
   const [issuedGiftCard, setIssuedGiftCard] = useState<GiftCard | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [appliedToast, setAppliedToast] = useState(false);
@@ -215,23 +230,25 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
   const handlePurchaseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    setStripeNotConfigured(false);
+    setGatewayNotConfigured(false);
+    setPaypalError(null);
 
-    if (amountCents < 2000 || amountCents > 200000) {
-      setFormError('Gift card value must be between $20.00 NZD and $2,000.00 NZD.');
+    const parsed = validateWithSchema(giftCardPurchaseSchema, {
+      amountCents,
+      purchaserName,
+      purchaserEmail,
+      recipientName: recipientName.trim() || purchaserName.trim(),
+      recipientEmail: recipientEmail.trim() || purchaserEmail.trim(),
+      message,
+    });
+    if (!parsed.success) {
+      setFormError(parsed.error);
       return;
     }
 
     setSubmitting(true);
     try {
-      const payload = {
-        amountCents,
-        purchaserName: purchaserName.trim(),
-        purchaserEmail: purchaserEmail.trim(),
-        recipientName: recipientName.trim() || purchaserName.trim(),
-        recipientEmail: recipientEmail.trim() || purchaserEmail.trim(),
-        message: message.trim(),
-      };
+      const payload = parsed.data;
 
       if (paymentMode === 'CASH_ON_PICKUP') {
         const res = await apiFetch<{ giftCard: GiftCard }>('/api/gift-cards/purchase-pickup', {
@@ -240,6 +257,17 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
         });
         setIssuedGiftCard(res.giftCard);
         onGiftCardCreated?.(res.giftCard);
+      } else if (paymentMode === 'PAYPAL') {
+        const res = await apiFetch<{
+          giftCard: GiftCard;
+          paypalOrderId: string;
+          clientId: string;
+          mode: 'sandbox' | 'live';
+        }>('/api/gift-cards/purchase-paypal', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        setPaypalSession(res);
       } else {
         const res = await apiFetch<{
           giftCard: GiftCard;
@@ -254,8 +282,9 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to start gift card purchase.';
       setFormError(msg);
-      if (msg.toLowerCase().includes('not configured') || msg.toLowerCase().includes('stripe')) {
-        setStripeNotConfigured(true);
+      const lower = msg.toLowerCase();
+      if (lower.includes('not configured') || lower.includes('stripe') || lower.includes('paypal')) {
+        setGatewayNotConfigured(true);
       }
     } finally {
       setSubmitting(false);
@@ -264,8 +293,18 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
 
   const handleCheckBalance = async (e: React.FormEvent) => {
     e.preventDefault();
-    const code = lookupCode.trim().toUpperCase();
-    if (!code) return;
+    const parsed = validateWithSchema(giftCardValidateQuerySchema, { code: lookupCode });
+    if (!parsed.success) {
+      setBalanceResult({
+        valid: false,
+        code: lookupCode.trim().toUpperCase(),
+        remainingBalanceCents: 0,
+        initialAmountCents: 0,
+        error: parsed.error,
+      });
+      return;
+    }
+    const code = parsed.data.code;
     setCheckingBalance(true);
     try {
       const res = await apiFetch<GiftCardValidationResult>(
@@ -288,14 +327,17 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
   const resetBuilder = () => {
     setIssuedGiftCard(null);
     setStripeSession(null);
+    setPaypalSession(null);
+    setPaypalError(null);
     setFormError(null);
-    setStripeNotConfigured(false);
+    setGatewayNotConfigured(false);
     setRecipientName('');
     setRecipientEmail('');
     setMessage('');
   };
 
-  const previewCard = issuedGiftCard || stripeSession?.giftCard || null;
+  const previewCard =
+    issuedGiftCard || stripeSession?.giftCard || paypalSession?.giftCard || null;
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-12 space-y-12 font-sans-ui">
@@ -392,7 +434,7 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                 1. Choose any value from <strong>$20 to $2,000 NZD</strong> and personalize your dedication.
               </li>
               <li>
-                2. Pay instantly via <strong>Stripe</strong> (emailed immediately with unique code) or reserve for <strong>Cash on Pickup</strong> in Napier.
+                2. Pay instantly via <strong>Stripe</strong> or <strong>PayPal</strong> (emailed immediately with unique code), or reserve for <strong>Cash on Pickup</strong> in Napier.
               </li>
               <li>
                 3. Enter the <code className="font-mono text-[#1B382B]">PA-GIFT-...</code> code in the cart drawer or checkout modal to deduct from any order, partially or in full.
@@ -493,6 +535,8 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                   <strong className="text-[#18231C]">
                     {issuedGiftCard.purchasePaymentMethod === 'CASH_ON_PICKUP'
                       ? 'Cash on Pickup'
+                      : issuedGiftCard.purchasePaymentMethod === 'PAYPAL'
+                      ? 'PayPal Checkout'
                       : 'Stripe Card'}
                   </strong>
                 </div>
@@ -516,6 +560,72 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                   </button>
                 )}
               </div>
+            </div>
+          ) : paypalSession ? (
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="font-display text-lg font-bold text-[#18231C]">
+                  2. Authorize PayPal Payment for {paypalSession.giftCard.recipientName}
+                </h2>
+                <p className="text-xs text-[#526058]">
+                  Complete payment securely via PayPal ({formatNZD(paypalSession.giftCard.initialAmountCents)} NZD). Your digital gift card code activates immediately upon capture.
+                </p>
+              </div>
+
+              <div className="p-4 border border-[#E8E2D6] rounded-xl bg-[#FAF9F6] space-y-3">
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#E8E2D6]">
+                  <span className="font-semibold text-[#18231C] flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-[#1B382B]" />
+                    PayPal Hosted Checkout ({paypalSession.mode === 'live' ? 'Live' : 'Sandbox'})
+                  </span>
+                  <span className="font-mono font-bold text-[#1B382B] tabular-nums">
+                    {formatNZD(paypalSession.giftCard.initialAmountCents)}
+                  </span>
+                </div>
+
+                {paypalError && (
+                  <div className="p-3 rounded-xl bg-[#A63A2A]/10 border border-[#A63A2A]/30 text-[#A63A2A] flex items-start gap-2 text-xs font-medium">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{paypalError}</span>
+                  </div>
+                )}
+
+                <PayPalButtonsBox
+                  clientId={paypalSession.clientId}
+                  createPayPalOrderId={() => paypalSession.paypalOrderId}
+                  onApprovePayPalOrder={async (approvedPpOrderId) => {
+                    setPaypalError(null);
+                    const confirmed = await apiFetch<{ giftCard: GiftCard }>(
+                      '/api/gift-cards/confirm-paypal',
+                      {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          giftCardId: paypalSession.giftCard.id,
+                          paypalOrderId: approvedPpOrderId,
+                        }),
+                      }
+                    );
+                    setPaypalSession(null);
+                    setIssuedGiftCard(confirmed.giftCard);
+                    onGiftCardCreated?.(confirmed.giftCard);
+                  }}
+                  onCancel={() => {
+                    setPaypalError('PayPal checkout was closed before authorization.');
+                  }}
+                  onError={(msg) => setPaypalError(msg)}
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setPaypalSession(null);
+                  setPaypalError(null);
+                }}
+                className="text-xs font-medium text-[#526058] hover:text-[#18231C] cursor-pointer"
+              >
+                ← Back to Details
+              </button>
             </div>
           ) : stripeSession && stripePromise ? (
             <div className="space-y-4">
@@ -561,7 +671,7 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                     <span>{formError}</span>
                   </div>
-                  {stripeNotConfigured &&
+                  {gatewayNotConfigured &&
                     currentUser?.role === 'ADMIN' &&
                     onOpenPaymentSettings && (
                       <button
@@ -693,14 +803,14 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                 <label className="font-semibold text-[#18231C] block">
                   2. Purchase Payment Method *
                 </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <button
                     type="button"
                     disabled={!stripeEnabled}
                     onClick={() => {
                       setPaymentMode('STRIPE');
                       setFormError(null);
-                      setStripeNotConfigured(false);
+                      setGatewayNotConfigured(false);
                     }}
                     className={`p-3 rounded-xl border text-left transition-colors cursor-pointer disabled:opacity-45 ${
                       paymentMode === 'STRIPE'
@@ -713,10 +823,36 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                         <CreditCard className="w-4 h-4 text-[#1B382B]" />
                         Stripe Card
                       </span>
-                      <span className="text-[10px] font-mono text-[#2D5A46]">Instant Code</span>
+                      <span className="text-[10px] font-mono text-[#2D5A46]">Instant</span>
                     </div>
                     <p className="text-[11px] text-[#526058] mt-1">
-                      Activated immediately and emailed to the recipient upon authorization.
+                      Activated immediately and emailed upon authorization.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!paypalEnabled}
+                    onClick={() => {
+                      setPaymentMode('PAYPAL');
+                      setFormError(null);
+                      setGatewayNotConfigured(false);
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-colors cursor-pointer disabled:opacity-45 ${
+                      paymentMode === 'PAYPAL'
+                        ? 'border-[#1B382B] bg-[#F7F9F8] ring-1 ring-[#1B382B]'
+                        : 'border-[#E8E2D6] bg-white hover:border-[#1B382B]/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between font-bold text-[#18231C]">
+                      <span className="flex items-center gap-1.5">
+                        <Wallet className="w-4 h-4 text-[#1B382B]" />
+                        PayPal
+                      </span>
+                      <span className="text-[10px] font-mono text-[#2D5A46]">Instant</span>
+                    </div>
+                    <p className="text-[11px] text-[#526058] mt-1">
+                      Pay with PayPal NZD and email the code immediately.
                     </p>
                   </button>
 
@@ -726,7 +862,7 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                     onClick={() => {
                       setPaymentMode('CASH_ON_PICKUP');
                       setFormError(null);
-                      setStripeNotConfigured(false);
+                      setGatewayNotConfigured(false);
                     }}
                     className={`p-3 rounded-xl border text-left transition-colors cursor-pointer disabled:opacity-45 ${
                       paymentMode === 'CASH_ON_PICKUP'
@@ -737,12 +873,12 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                     <div className="flex items-center justify-between font-bold text-[#18231C]">
                       <span className="flex items-center gap-1.5">
                         <Banknote className="w-4 h-4 text-[#1B382B]" />
-                        Cash on Pickup
+                        Cash Pickup
                       </span>
-                      <span className="text-[10px] font-mono text-[#2D5A46]">Napier Studio</span>
+                      <span className="text-[10px] font-mono text-[#2D5A46]">Napier</span>
                     </div>
                     <p className="text-[11px] text-[#526058] mt-1">
-                      Reserve gift card now and pay cash in Napier to activate the code.
+                      Reserve now and pay cash in Napier to activate.
                     </p>
                   </button>
                 </div>
@@ -768,6 +904,8 @@ export const GiftCardsView: React.FC<GiftCardsViewProps> = ({
                     ? 'Preparing Gift Card...'
                     : paymentMode === 'CASH_ON_PICKUP'
                     ? `Reserve Cash on Pickup Gift Card (${formatNZD(amountCents)})`
+                    : paymentMode === 'PAYPAL'
+                    ? `Continue to PayPal Checkout (${formatNZD(amountCents)})`
                     : `Continue to Stripe Payment (${formatNZD(amountCents)})`}
                 </span>
               </button>

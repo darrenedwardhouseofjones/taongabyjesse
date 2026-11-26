@@ -13,6 +13,11 @@ import {
 } from 'lucide-react';
 import { CustomCommission, Order, SiteSettings, UserProfile, WishlistItem } from '../types';
 import { apiFetch, setSessionToken } from '../utils/api';
+import {
+  loginPayloadSchema,
+  registerFormSchema,
+  validateWithSchema,
+} from '../validation/schemas';
 
 interface AuthSuccessPayload {
   user: UserProfile;
@@ -101,11 +106,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    const parsed = validateWithSchema(loginPayloadSchema, {
+      identifier: email,
+      password,
+    });
+    if (!parsed.success) {
+      setError(parsed.error);
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const payload = await apiFetch<AuthSuccessPayload>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({
+          email: parsed.data.identifier,
+          password: parsed.data.password,
+        }),
       });
       setSessionToken(payload.token);
       onAuthSuccess(payload);
@@ -121,8 +138,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (password !== confirmPassword) {
-      setError('Passwords do not match.');
+    const parsed = validateWithSchema(registerFormSchema, {
+      firstName,
+      lastName,
+      email,
+      password,
+      confirmPassword,
+    });
+    if (!parsed.success) {
+      setError(parsed.error);
       return;
     }
 
@@ -130,7 +154,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const payload = await apiFetch<AuthSuccessPayload>('/api/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ firstName, lastName, email, password }),
+        body: JSON.stringify({
+          firstName: parsed.data.firstName,
+          lastName: parsed.data.lastName,
+          email: parsed.data.email,
+          password: parsed.data.password,
+        }),
       });
       setSessionToken(payload.token);
       onAuthSuccess(payload);

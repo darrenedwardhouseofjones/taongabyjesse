@@ -8,12 +8,19 @@ import {
   Download,
   FileText,
   ShieldCheck,
+  Award,
 } from 'lucide-react';
-import { Courier, Order, SiteSettings } from '../types';
+import { CertificateRecord, Courier, Order, SiteSettings } from '../types';
 import { formatNZD } from '../utils/pricing';
 import { generateOrderReceiptPdf } from '../utils/receiptPdf';
 import { apiFetch } from '../utils/api';
 import { sanitizeSafeHref } from '../utils/url';
+import { CertificatePrintModal } from './CertificateOfAuthenticity';
+import {
+  orderLookupQuerySchema,
+  orderVerifyEmailSchema,
+  validateWithSchema,
+} from '../validation/schemas';
 
 interface OrderLookupViewProps {
   orders: Order[];
@@ -64,13 +71,30 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
   const [searched, setSearched] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [pdfDownloaded, setPdfDownloaded] = useState(false);
+  const [certDownloading, setCertDownloading] = useState(false);
+  const [certError, setCertError] = useState<string | null>(null);
+  const [certPreviewModal, setCertPreviewModal] = useState<{
+    orderNumber: string;
+    certificates: CertificateRecord[];
+  } | null>(null);
+
+  const [searchError, setSearchError] = useState('');
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanQuery = query.trim().toUpperCase();
-    if (!cleanQuery) return;
-    setIsSearching(true);
     setVerifyError('');
+    setSearchError('');
+    const parsed = validateWithSchema(orderLookupQuerySchema, {
+      q: query,
+      email: verifyEmail.trim() || undefined,
+    });
+    if (!parsed.success) {
+      setSearchError(parsed.error);
+      return;
+    }
+
+    const cleanQuery = parsed.data.q.toUpperCase();
+    setIsSearching(true);
     const localMatch = orders.find(
       (o) =>
         o.orderNumber.toUpperCase() === cleanQuery ||
@@ -85,11 +109,11 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     }
 
     try {
-      const emailParam = verifyEmail.trim()
-        ? `&email=${encodeURIComponent(verifyEmail.trim())}`
+      const emailParam = parsed.data.email
+        ? `&email=${encodeURIComponent(parsed.data.email)}`
         : '';
       const res = await apiFetch<{ order: Order | null }>(
-        `/api/orders/lookup?q=${encodeURIComponent(query.trim())}${emailParam}`
+        `/api/orders/lookup?q=${encodeURIComponent(parsed.data.q)}${emailParam}`
       );
       setMatchedOrder(res.order);
     } catch {
@@ -102,13 +126,21 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
 
   const handleVerifyReceiptEmail = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!matchedOrder || !verifyEmail.trim()) return;
-    setIsSearching(true);
+    if (!matchedOrder) return;
     setVerifyError('');
+    const parsed = validateWithSchema(orderVerifyEmailSchema, {
+      email: verifyEmail,
+    });
+    if (!parsed.success) {
+      setVerifyError(parsed.error);
+      return;
+    }
+
+    setIsSearching(true);
     try {
       const res = await apiFetch<{ order: Order | null }>(
         `/api/orders/lookup?q=${encodeURIComponent(matchedOrder.orderNumber)}&email=${encodeURIComponent(
-          verifyEmail.trim()
+          parsed.data.email
         )}`
       );
       if (res.order && !res.order.customerEmail.includes('***')) {
@@ -128,6 +160,37 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     generateOrderReceiptPdf(matchedOrder, activeSettings);
     setPdfDownloaded(true);
     setTimeout(() => setPdfDownloaded(false), 3000);
+  };
+
+  const handleOpenCertificatesModal = async () => {
+    if (!matchedOrder || certDownloading) return;
+    setCertDownloading(true);
+    setCertError(null);
+    try {
+      const emailParam = verifyEmail.trim()
+        ? `?email=${encodeURIComponent(verifyEmail.trim())}`
+        : '';
+      const res = await apiFetch<{ certificates: CertificateRecord[]; order?: Order }>(
+        `/api/orders/${encodeURIComponent(matchedOrder.id)}/certificates${emailParam}`
+      );
+      if (res.order) {
+        setMatchedOrder(res.order);
+      }
+      if (!res.certificates || res.certificates.length === 0) {
+        setCertError('No certificates found for this order yet.');
+        return;
+      }
+      setCertPreviewModal({
+        orderNumber: matchedOrder.orderNumber,
+        certificates: res.certificates,
+      });
+    } catch (err) {
+      setCertError(
+        err instanceof Error ? err.message : 'Unable to load certificate cards.'
+      );
+    } finally {
+      setCertDownloading(false);
+    }
   };
 
   const isCompletedPurchase = matchedOrder
@@ -165,6 +228,9 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
             <span>{isSearching ? 'Searching...' : 'Search'}</span>
           </button>
         </form>
+        {searchError && (
+          <div className="text-xs text-[#A63A2A] font-medium pt-1">{searchError}</div>
+        )}
       </div>
 
       {searched && (
@@ -286,8 +352,21 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                           </span>
                         </div>
                         <div className="text-[10px] text-[#526058]">
-                          Origin: {item.originRiver} · Hand-Carved by Jesse
+                          Origin: {item.originRiver} · Hand-Carved by {item.carverName || 'Jesse'}
                         </div>
+                        {item.certificateNumbers && item.certificateNumbers.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-1">
+                            {item.certificateNumbers.map((cn) => (
+                              <span
+                                key={cn}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#1B382B]/10 text-[#1B382B] font-mono text-[10px] font-semibold"
+                              >
+                                <Award className="w-2.5 h-2.5 text-[#C29B38]" />
+                                {cn}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="font-mono font-bold text-[#1B382B]">
                         {formatNZD(item.priceCents * item.quantity)}
@@ -358,23 +437,36 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                         Verify checkout email below to download tax receipt.
                       </span>
                     ) : isCompletedPurchase ? (
-                      <button
-                        type="button"
-                        onClick={handleDownloadPdf}
-                        className="px-4 py-2 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] hover:from-[#12241B] hover:to-[#1B382B] text-white text-xs font-semibold rounded-xl flex items-center gap-2 cursor-pointer shadow-sm transition-all"
-                      >
-                        {pdfDownloaded ? (
-                          <>
-                            <CheckCircle2 className="w-3.5 h-3.5 text-[#7FA892]" />
-                            <span>Receipt PDF Downloaded</span>
-                          </>
-                        ) : (
-                          <>
-                            <Download className="w-3.5 h-3.5 text-[#7FA892]" />
-                            <span>Download Receipt (PDF)</span>
-                          </>
-                        )}
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenCertificatesModal()}
+                          disabled={certDownloading}
+                          className="px-3.5 py-2 border border-[#1B382B] bg-white text-[#1B382B] hover:bg-[#FAF9F6] text-xs font-semibold rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-60"
+                        >
+                          <Award className="w-3.5 h-3.5 text-[#C29B38]" />
+                          <span>
+                            {certDownloading ? 'Loading...' : 'Certificate Card'}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDownloadPdf}
+                          className="px-4 py-2 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] hover:from-[#12241B] hover:to-[#1B382B] text-white text-xs font-semibold rounded-xl flex items-center gap-2 cursor-pointer shadow-sm transition-all"
+                        >
+                          {pdfDownloaded ? (
+                            <>
+                              <CheckCircle2 className="w-3.5 h-3.5 text-[#7FA892]" />
+                              <span>Receipt PDF Downloaded</span>
+                            </>
+                          ) : (
+                            <>
+                              <Download className="w-3.5 h-3.5 text-[#7FA892]" />
+                              <span>Download Receipt (PDF)</span>
+                            </>
+                          )}
+                        </button>
+                      </>
                     ) : (
                       <span className="text-[11px] text-[#526058] italic px-2">
                         PDF receipt available once payment is completed.
@@ -382,6 +474,12 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
                     )}
                   </div>
                 </div>
+
+                {certError && (
+                  <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-red-900 text-[11px]">
+                    {certError}
+                  </div>
+                )}
 
                 {isRedactedOrder && (
                   <form
@@ -537,6 +635,13 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
           )}
         </div>
       )}
+      <CertificatePrintModal
+        isOpen={Boolean(certPreviewModal)}
+        onClose={() => setCertPreviewModal(null)}
+        certificates={certPreviewModal?.certificates || []}
+        settings={activeSettings}
+        orderNumber={certPreviewModal?.orderNumber}
+      />
     </div>
   );
 };

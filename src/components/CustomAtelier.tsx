@@ -22,6 +22,13 @@ import {
   UserProfile,
 } from '../types';
 import { calculateCustomPieceCents, formatNZD } from '../utils/pricing';
+import {
+  commissionCreateSchema,
+  commissionDirectQuoteFormSchema,
+  commissionLookupSchema,
+  commissionMessageSchema,
+  validateWithSchema,
+} from '../validation/schemas';
 
 export interface CreateCommissionPayload extends CustomCommission {
   mode: 'configurator' | 'direct-quote';
@@ -278,8 +285,28 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (!quoteName.trim() || !quoteEmail.trim()) {
-      setFormError('Please provide your full name and email address to submit this custom carving to Jesse.');
+    const parsed = validateWithSchema(commissionCreateSchema, {
+      customerName: quoteName,
+      customerEmail: quoteEmail,
+      customerPhone: quotePhone,
+      material: selectedMaterial,
+      designType: selectedDesign,
+      pendantSizeMm: selectedSizeMm,
+      cordStyle: selectedCord,
+      bindingStyle: selectedBinding,
+      specialNotes: `Configured Custom Piece.${
+        includePauaEye ? ' Includes Pāua inlay.' : ''
+      }${includeHardwoodBox ? ' Includes Rimu Presentation Box.' : ''}${
+        configuratorNotes.trim() ? ` Notes: ${configuratorNotes.trim()}` : ''
+      }`,
+      budgetRange: formatNZD(calculatedCents),
+      referenceImageUrl: referenceImg || undefined,
+      mode: 'configurator',
+      includePauaEye,
+      includeHardwoodBox,
+    });
+    if (!parsed.success) {
+      setFormError(parsed.error);
       return;
     }
 
@@ -288,21 +315,17 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
       const payload: CreateCommissionPayload = {
         id: `comm-${Date.now()}`,
         referenceNumber: `CC-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
-        customerName: quoteName.trim(),
-        customerEmail: quoteEmail.trim(),
-        customerPhone: quotePhone.trim(),
-        material: selectedMaterial,
-        designType: selectedDesign,
-        pendantSizeMm: selectedSizeMm,
-        cordStyle: selectedCord,
-        bindingStyle: selectedBinding,
-        specialNotes: `Configured Custom Piece.${
-          includePauaEye ? ' Includes Pāua inlay.' : ''
-        }${includeHardwoodBox ? ' Includes Rimu Presentation Box.' : ''}${
-          configuratorNotes.trim() ? ` Notes: ${configuratorNotes.trim()}` : ''
-        }`,
-        budgetRange: formatNZD(calculatedCents),
-        referenceImageUrl: referenceImg || undefined,
+        customerName: parsed.data.customerName,
+        customerEmail: parsed.data.customerEmail,
+        customerPhone: parsed.data.customerPhone,
+        material: parsed.data.material,
+        designType: parsed.data.designType,
+        pendantSizeMm: parsed.data.pendantSizeMm,
+        cordStyle: parsed.data.cordStyle,
+        bindingStyle: parsed.data.bindingStyle,
+        specialNotes: parsed.data.specialNotes,
+        budgetRange: parsed.data.budgetRange || formatNZD(calculatedCents),
+        referenceImageUrl: parsed.data.referenceImageUrl,
         status: 'REQUESTED',
         quoteAmountCents: calculatedCents,
         depositAmountCents: Math.round(calculatedCents * 0.5),
@@ -311,7 +334,7 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
           {
             id: `m-${Date.now()}`,
             sender: 'customer',
-            senderName: quoteName.trim(),
+            senderName: parsed.data.customerName,
             text: `Kia ora Jesse, I have configured a custom ${selectedMaterial} ${selectedDesign} (${selectedSizeMm}mm) with ${selectedCord}.${
               configuratorNotes.trim() ? ` ${configuratorNotes.trim()}` : ''
             }`,
@@ -342,16 +365,34 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
     e.preventDefault();
     setFormError(null);
 
-    if (!quoteName.trim() || !quoteEmail.trim()) {
-      setFormError('Please provide your name and email address.');
+    const parsedForm = validateWithSchema(commissionDirectQuoteFormSchema, {
+      customerName: quoteName,
+      customerEmail: quoteEmail,
+      customerPhone: quotePhone,
+      specialNotes: quoteNotes,
+      rightsConfirmed,
+    });
+    if (!parsedForm.success) {
+      setFormError(parsedForm.error);
       return;
     }
-    if (!quoteNotes.trim()) {
-      setFormError('Please describe your design idea and carving notes for Jesse.');
-      return;
-    }
-    if (!rightsConfirmed) {
-      setFormError('Please confirm you have the right to request this custom carving before submitting.');
+
+    const parsedPayload = validateWithSchema(commissionCreateSchema, {
+      customerName: parsedForm.data.customerName,
+      customerEmail: parsedForm.data.customerEmail,
+      customerPhone: parsedForm.data.customerPhone,
+      material: selectedMaterial,
+      designType: selectedDesign,
+      pendantSizeMm: selectedSizeMm,
+      cordStyle: selectedCord,
+      bindingStyle: selectedBinding,
+      specialNotes: parsedForm.data.specialNotes,
+      budgetRange: quoteBudget,
+      referenceImageUrl: referenceImg || undefined,
+      mode: 'direct-quote',
+    });
+    if (!parsedPayload.success) {
+      setFormError(parsedPayload.error);
       return;
     }
 
@@ -360,24 +401,24 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
       const payload: CreateCommissionPayload = {
         id: `comm-${Date.now()}`,
         referenceNumber: `CC-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
-        customerName: quoteName.trim(),
-        customerEmail: quoteEmail.trim(),
-        customerPhone: quotePhone.trim(),
-        material: selectedMaterial,
-        designType: selectedDesign,
-        pendantSizeMm: selectedSizeMm,
-        cordStyle: selectedCord,
-        bindingStyle: selectedBinding,
-        specialNotes: quoteNotes.trim(),
-        budgetRange: quoteBudget,
-        referenceImageUrl: referenceImg || undefined,
+        customerName: parsedPayload.data.customerName,
+        customerEmail: parsedPayload.data.customerEmail,
+        customerPhone: parsedPayload.data.customerPhone,
+        material: parsedPayload.data.material,
+        designType: parsedPayload.data.designType,
+        pendantSizeMm: parsedPayload.data.pendantSizeMm,
+        cordStyle: parsedPayload.data.cordStyle,
+        bindingStyle: parsedPayload.data.bindingStyle,
+        specialNotes: parsedPayload.data.specialNotes,
+        budgetRange: parsedPayload.data.budgetRange || quoteBudget,
+        referenceImageUrl: parsedPayload.data.referenceImageUrl,
         status: 'REQUESTED',
         messages: [
           {
             id: `m-${Date.now()}`,
             sender: 'customer',
-            senderName: quoteName.trim(),
-            text: quoteNotes.trim(),
+            senderName: parsedPayload.data.customerName,
+            text: parsedPayload.data.specialNotes,
             timestamp: new Date().toISOString(),
           },
         ],
@@ -402,12 +443,20 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !selectedCommissionId) return;
+    if (!selectedCommissionId) return;
     setFormError(null);
+    const parsed = validateWithSchema(commissionMessageSchema, {
+      text: chatInput,
+      sender: isAdmin && senderMode === 'carver' ? 'carver' : 'customer',
+    });
+    if (!parsed.success) {
+      setFormError(parsed.error);
+      return;
+    }
     setIsSendingChat(true);
     try {
       const effectiveSender = isAdmin && senderMode === 'carver' ? 'carver' : 'customer';
-      await onSendMessage(selectedCommissionId, chatInput.trim(), effectiveSender);
+      await onSendMessage(selectedCommissionId, parsed.data.text, effectiveSender);
       setChatInput('');
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to send message.');
@@ -418,11 +467,19 @@ export const CustomAtelier: React.FC<CustomAtelierProps> = ({
 
   const handleLookup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onLookupCommission || !lookupRef.trim() || !lookupEmail.trim()) return;
+    if (!onLookupCommission) return;
     setLookupMessage(null);
+    const parsed = validateWithSchema(commissionLookupSchema, {
+      ref: lookupRef,
+      email: lookupEmail,
+    });
+    if (!parsed.success) {
+      setLookupMessage(parsed.error);
+      return;
+    }
     setIsLookingUp(true);
     try {
-      const found = await onLookupCommission(lookupRef.trim(), lookupEmail.trim());
+      const found = await onLookupCommission(parsed.data.ref, parsed.data.email);
       if (found) {
         setSelectedCommissionId(found.id);
         setLookupMessage(null);

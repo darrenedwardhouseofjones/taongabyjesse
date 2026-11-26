@@ -22,9 +22,9 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   authenticityPolicyText:
     'Every pounamu taonga carved in our Napier studio uses legally sourced West Coast (Te Tai o Poutini) and South Island nephrite and bowenite. Each piece ships with its river origin and individual authenticity provenance record. Whale bone pieces carry a DOC permit or exemption reference and are restricted to New Zealand delivery unless CITES export approval is arranged.',
   termsAndConditionsText:
-    '1. Natural Stone Character\nNatural pounamu (nephrite jade) exhibits organic mineral inclusions, colour shifts, and feathering that attest to its geological authenticity. Each ready-to-wear piece is photographed individually.\n\n2. Pricing & GST\nAll prices are displayed in New Zealand Dollars (NZD) and are inclusive of 15% NZ GST.\n\n3. Payment Methods\nWe accept major credit/debit cards securely via Stripe Elements as well as Cash on Pickup at our Napier workshop (scheduled by appointment) and Digital Gift Cards.',
+    '1. Natural Stone Character\nNatural pounamu (nephrite jade) exhibits organic mineral inclusions, colour shifts, and feathering that attest to its geological authenticity. Each ready-to-wear piece is photographed individually.\n\n2. Pricing & GST\nAll prices are displayed in New Zealand Dollars (NZD) and are inclusive of 15% NZ GST.\n\n3. Payment Methods\nWe accept major credit/debit cards securely via Stripe Elements, PayPal, Cash on Pickup at our Napier workshop (scheduled by appointment), and Digital Gift Cards.',
   privacyPolicyText:
-    'In accordance with the New Zealand Privacy Act 2020, Pounamu Atelier collects only the personal information required to carve, certify, dispatch, or arrange studio collection of your order (name, email, phone number, and delivery address).\n\nPayment card details are processed directly inside Stripe-hosted iframes and never touch our servers. Customers may request access to or correction of their stored order records at any time by contacting the studio.',
+    'In accordance with the New Zealand Privacy Act 2020, Pounamu Atelier collects only the personal information required to carve, certify, dispatch, or arrange studio collection of your order (name, email, phone number, and delivery address).\n\nPayment card and PayPal details are processed directly inside Stripe or PayPal hosted interfaces and never touch our servers. Customers may request access to or correction of their stored order records at any time by contacting the studio.',
   shippingAndReturnsPolicyText:
     'New Zealand orders dispatch via tracked NZ Post or Aramex courier from Napier. Signature-required courier is recommended for high-value heirloom pieces.\n\nReady-to-wear pieces may be returned unworn within the return window in original packaging. Custom commissions and personalised carvings are non-refundable once stone cutting has begun, unless faulty under the Consumer Guarantees Act 1993.',
   customCommissionsPolicyText:
@@ -51,6 +51,9 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
   stripeMode: 'test',
   stripePublishableKey: '',
   stripeStatementDescriptor: 'POUNAMU ATELIER',
+  paypalEnabled: true,
+  paypalMode: 'sandbox',
+  paypalClientId: '',
   cashOnPickupEnabled: true,
   cashOnPickupInstructions:
     'Pay in cash when collecting your piece directly from Jesse at 42 Carlyle Street, Napier. We will email you as soon as your taonga is ready for pickup.',

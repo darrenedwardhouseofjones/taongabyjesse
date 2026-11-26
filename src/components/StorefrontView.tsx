@@ -23,7 +23,11 @@ interface StorefrontViewProps {
   wishlist?: WishlistItem[];
   currentUser?: UserProfile | null;
   initialProductId?: string | null;
+  initialSearchQuery?: string;
+  initialVariety?: string;
+  initialMotif?: string;
   onClearInitialProduct?: () => void;
+  onActiveProductChange?: (product: Product | null) => void;
   onAddToCart: (product: Product) => void;
   onToggleWishlist?: (input: WishlistToggleInput) => void;
   onOpenCustom: () => void;
@@ -38,7 +42,11 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
   wishlist = [],
   currentUser = null,
   initialProductId = null,
+  initialSearchQuery = '',
+  initialVariety = 'All',
+  initialMotif = 'All',
   onClearInitialProduct,
+  onActiveProductChange,
   onAddToCart,
   onToggleWishlist,
   onOpenCustom,
@@ -46,11 +54,33 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
   onOpenGiftCards,
   onOpenStory,
 }) => {
-  const [selectedVariety, setSelectedVariety] = useState<string>('All');
-  const [selectedMotif, setSelectedMotif] = useState<string>('All');
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedVariety, setSelectedVariety] = useState<string>(initialVariety || 'All');
+  const [selectedMotif, setSelectedMotif] = useState<string>(initialMotif || 'All');
+  const [searchQuery, setSearchQuery] = useState<string>(initialSearchQuery || '');
   const [activeProductModal, setActiveProductModal] = useState<Product | null>(null);
   const [addedToast, setAddedToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialSearchQuery) {
+      setSearchQuery(initialSearchQuery);
+    }
+  }, [initialSearchQuery]);
+
+  useEffect(() => {
+    if (initialVariety) {
+      setSelectedVariety(initialVariety);
+    }
+  }, [initialVariety]);
+
+  useEffect(() => {
+    if (initialMotif) {
+      setSelectedMotif(initialMotif);
+    }
+  }, [initialMotif]);
+
+  useEffect(() => {
+    onActiveProductChange?.(activeProductModal);
+  }, [activeProductModal, onActiveProductChange]);
 
   useEffect(() => {
     if (!initialProductId || products.length === 0) return;
@@ -74,7 +104,13 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
     const matchSearch =
       normalizedQuery === '' ||
       p.title.toLowerCase().includes(normalizedQuery) ||
-      p.material.toLowerCase().includes(normalizedQuery);
+      p.material.toLowerCase().includes(normalizedQuery) ||
+      p.designType.toLowerCase().includes(normalizedQuery) ||
+      p.originRiver.toLowerCase().includes(normalizedQuery) ||
+      p.sku.toLowerCase().includes(normalizedQuery) ||
+      p.authenticityCode.toLowerCase().includes(normalizedQuery) ||
+      p.description.toLowerCase().includes(normalizedQuery) ||
+      p.spiritualMeaning.toLowerCase().includes(normalizedQuery);
     return matchVariety && matchMotif && matchSearch;
   });
 
@@ -405,8 +441,14 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                 (product.isUniquePiece ? inCartQty >= 1 : inCartQty >= product.quantity);
 
               return (
-                <div
+                <article
                   key={product.id}
+                  data-product-id={product.id}
+                  data-product-sku={product.sku}
+                  data-price-nzd={(product.priceCents / 100).toFixed(2)}
+                  data-in-stock={isOutOfStock ? 'false' : 'true'}
+                  data-material={product.material}
+                  data-design={product.designType}
                   className="group glass-card rounded-2xl overflow-hidden flex flex-col justify-between"
                 >
                   {/* Product Image Container */}
@@ -532,12 +574,23 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
 
                       <div className="flex items-center gap-2">
                         <button
+                          type="button"
                           onClick={() => setActiveProductModal(product)}
+                          aria-label={`View details for ${product.title}`}
                           className="px-3 py-2 glass-button text-xs font-semibold rounded-xl text-[#18231C] hover:bg-white cursor-pointer"
                         >
                           Details
                         </button>
                         <button
+                          type="button"
+                          data-add-to-cart={product.id}
+                          aria-label={
+                            isOutOfStock
+                              ? `${product.title} is sold out`
+                              : isAtCartMax
+                              ? `${product.title} is already in cart`
+                              : `Add ${product.title} to cart`
+                          }
                           disabled={isOutOfStock || isAtCartMax}
                           onClick={() => handleAdd(product)}
                           className="px-4 py-2 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] hover:from-[#12241B] hover:to-[#1B382B] disabled:opacity-45 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm hover:shadow-md"
@@ -553,7 +606,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                       </div>
                     </div>
                   </div>
-                </div>
+                </article>
               );
             })}
           </div>

@@ -25,8 +25,11 @@ import {
   FileSearch,
   Gift,
   Lock,
+  Award,
+  Printer,
 } from 'lucide-react';
 import {
+  CertificateRecord,
   Courier,
   CourierRate,
   CustomCommission,
@@ -51,6 +54,12 @@ import { AdminDashboard } from './AdminDashboard';
 import { buildCourierTrackingUrl, OrderLookupView } from './OrderLookupView';
 import { sanitizeSafeHref } from '../utils/url';
 import type { DashboardSection } from './Navbar';
+import { CertificatePrintModal } from './CertificateOfAuthenticity';
+import {
+  passwordUpdateFormSchema,
+  profileUpdateSchema,
+  validateWithSchema,
+} from '../validation/schemas';
 
 interface DashboardViewProps {
   user: UserProfile;
@@ -222,10 +231,47 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const effectiveSection: DashboardSection =
     !isAdmin && activeSection.startsWith('admin-') ? 'client-orders' : activeSection;
 
+  const [certDownloadingOrderId, setCertDownloadingOrderId] = useState<string | null>(null);
+  const [certDownloadError, setCertDownloadError] = useState<string | null>(null);
+  const [certPreviewModal, setCertPreviewModal] = useState<{
+    orderNumber: string;
+    initialProductId?: string;
+    certificates: CertificateRecord[];
+  } | null>(null);
+
   const handleDownloadPdf = (order: Order) => {
     generateOrderReceiptPdf(order, settings);
     setDownloadedOrderId(order.id);
     setTimeout(() => setDownloadedOrderId(null), 3000);
+  };
+
+  const handleOpenCertificatesModal = async (order: Order, focusProductId?: string) => {
+    if (certDownloadingOrderId) return;
+    setCertDownloadingOrderId(order.id);
+    setCertDownloadError(null);
+    try {
+      const res = await apiFetch<{ certificates: CertificateRecord[]; order?: Order }>(
+        `/api/orders/${encodeURIComponent(order.id)}/certificates`
+      );
+      if (res.order) {
+        await onUpdateOrder(res.order);
+      }
+      if (!res.certificates || res.certificates.length === 0) {
+        setCertDownloadError('No certificates available for this order yet.');
+        return;
+      }
+      setCertPreviewModal({
+        orderNumber: order.orderNumber,
+        initialProductId: focusProductId,
+        certificates: res.certificates,
+      });
+    } catch (err) {
+      setCertDownloadError(
+        err instanceof Error ? err.message : 'Unable to load certificates.'
+      );
+    } finally {
+      setCertDownloadingOrderId(null);
+    }
   };
 
   const handleAdminExportOrdersCsv = () => {
@@ -235,14 +281,27 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setTimeout(() => setCsvExportNotice(null), 5000);
   };
 
+  const [profileError, setProfileError] = useState<string | null>(null);
+
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firstNameInput.trim()) return;
+    setProfileError(null);
+    const parsed = validateWithSchema(profileUpdateSchema, {
+      firstName: firstNameInput,
+      lastName: lastNameInput,
+    });
+    if (!parsed.success) {
+      setProfileError(parsed.error);
+      return;
+    }
+
     setProfileSaving(true);
     try {
-      await onUpdateProfile(firstNameInput.trim(), lastNameInput.trim());
+      await onUpdateProfile(parsed.data.firstName, parsed.data.lastName);
       setProfileSaved(true);
       setTimeout(() => setProfileSaved(false), 3000);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : 'Unable to save profile.');
     } finally {
       setProfileSaving(false);
     }
@@ -252,12 +311,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     e.preventDefault();
     setPasswordError(null);
     setPasswordSaved(false);
-    if (newPasswordInput.length < 8) {
-      setPasswordError('New password must be at least 8 characters.');
-      return;
-    }
-    if (newPasswordInput !== confirmNewPasswordInput) {
-      setPasswordError('New passwords do not match.');
+    const parsed = validateWithSchema(passwordUpdateFormSchema, {
+      currentPassword: currentPasswordInput,
+      newPassword: newPasswordInput,
+      confirmNewPassword: confirmNewPasswordInput,
+      requireCurrent: user.authProvider === 'email',
+    });
+    if (!parsed.success) {
+      setPasswordError(parsed.error);
       return;
     }
     setPasswordSaving(true);
@@ -265,8 +326,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       await apiFetch<{ ok: boolean }>('/api/auth/password', {
         method: 'PATCH',
         body: JSON.stringify({
-          currentPassword: currentPasswordInput,
-          newPassword: newPasswordInput,
+          currentPassword: parsed.data.currentPassword,
+          newPassword: parsed.data.newPassword,
         }),
       });
       setCurrentPasswordInput('');
@@ -693,10 +754,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         {myOrders[0].items.map((i) => i.title).join(', ')}
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono font-bold text-[#1B382B]">
                         {formatNZD(myOrders[0].totalCents)}
                       </span>
+                      {myOrders[0].status !== 'PENDING' && (
+                        <button
+                          type="button"
+                          disabled={certDownloadingOrderId === myOrders[0].id}
+                          onClick={() => void handleOpenCertificatesModal(myOrders[0])}
+                          className="px-3 py-1.5 border border-[#1B382B] text-[#1B382B] bg-white hover:bg-[#FAF9F6] rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        >
+                          <Printer className="w-3.5 h-3.5 text-[#C29B38]" />
+                          <span>
+                            {certDownloadingOrderId === myOrders[0].id
+                              ? 'Loading...'
+                              : 'Print Authenticity Card'}
+                          </span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleDownloadPdf(myOrders[0])}
@@ -754,6 +830,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <div className="p-2.5 rounded-xl bg-[#2D5A46]/10 border border-[#2D5A46]/30 text-[#1B382B] text-xs flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-[#2D5A46] shrink-0" />
                     <span>{csvExportNotice}</span>
+                  </div>
+                )}
+                {certDownloadError && (
+                  <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-red-900 text-xs">
+                    {certDownloadError}
                   </div>
                 )}
               </div>
@@ -823,6 +904,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                       ? 'Paid'
                                       : 'Pay on Collection'
                                   }) · Napier Studio`
+                                : order.paymentMethod === 'PAYPAL'
+                                ? `PayPal · ${order.courierName} (${order.courierServiceName})`
                                 : `Stripe Card · ${order.courierName} (${order.courierServiceName})`}
                               {(order.giftCardAppliedCents || 0) > 0 &&
                                 order.paymentMethod !== 'GIFT_CARD' && (
@@ -850,23 +933,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             </div>
 
                             {isCompleted && (
-                              <button
-                                type="button"
-                                onClick={() => handleDownloadPdf(order)}
-                                className="px-3.5 py-2 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
-                              >
-                                {downloadedOrderId === order.id ? (
-                                  <>
-                                    <CheckCircle2 className="w-3.5 h-3.5 text-[#7FA892]" />
-                                    <span>Downloaded</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Download className="w-3.5 h-3.5 text-[#7FA892]" />
-                                    <span>Receipt PDF</span>
-                                  </>
-                                )}
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={certDownloadingOrderId === order.id}
+                                  onClick={() => void handleOpenCertificatesModal(order)}
+                                  className="px-3 py-2 border border-[#1B382B] bg-white text-[#1B382B] hover:bg-[#FAF9F6] text-xs font-semibold rounded-xl flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                >
+                                  <Printer className="w-3.5 h-3.5 text-[#C29B38]" />
+                                  <span>
+                                    {certDownloadingOrderId === order.id
+                                      ? 'Loading...'
+                                      : 'Print Authenticity Card'}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadPdf(order)}
+                                  className="px-3.5 py-2 bg-gradient-to-r from-[#1B382B] to-[#2D5A46] text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
+                                >
+                                  {downloadedOrderId === order.id ? (
+                                    <>
+                                      <CheckCircle2 className="w-3.5 h-3.5 text-[#7FA892]" />
+                                      <span>Downloaded</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Download className="w-3.5 h-3.5 text-[#7FA892]" />
+                                      <span>Receipt PDF</span>
+                                    </>
+                                  )}
+                                </button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -876,14 +974,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           {order.items.map((item, idx) => (
                             <div
                               key={idx}
-                              className="p-3 rounded-xl bg-[#FAF9F6] border border-[#E8E2D6] flex items-center gap-3.5 text-xs"
+                              className="p-3 rounded-xl bg-[#FAF9F6] border border-[#E8E2D6] flex flex-wrap items-center gap-3.5 text-xs"
                             >
                               <img
                                 src={item.image}
                                 alt={item.title}
                                 className="w-12 h-12 rounded-lg object-cover border border-[#E8E2D6]"
                               />
-                              <div className="flex-1 min-w-0">
+                              <div className="flex-1 min-w-[180px]">
                                 <div className="font-bold text-[#18231C] truncate">{item.title}</div>
                                 <div className="text-[11px] text-[#526058]">
                                   {item.material} Pounamu · Code:{' '}
@@ -892,9 +990,37 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                   </span>{' '}
                                   · Qty {item.quantity}
                                 </div>
+                                {item.certificateNumbers && item.certificateNumbers.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 pt-1">
+                                    {item.certificateNumbers.map((cn) => (
+                                      <span
+                                        key={cn}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#1B382B]/10 text-[#1B382B] font-mono text-[10px] font-semibold"
+                                      >
+                                        <Award className="w-2.5 h-2.5 text-[#C29B38]" />
+                                        {cn}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              <div className="font-mono font-bold text-[#1B382B]">
-                                {formatNZD(item.priceCents * item.quantity)}
+                              <div className="flex items-center gap-2.5">
+                                {isCompleted && (
+                                  <button
+                                    type="button"
+                                    disabled={certDownloadingOrderId === order.id}
+                                    onClick={() =>
+                                      void handleOpenCertificatesModal(order, item.productId)
+                                    }
+                                    className="px-2.5 py-1.5 border border-[#C29B38]/70 bg-white hover:bg-[#EFE9DC] text-[#18231C] rounded-lg text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                  >
+                                    <Printer className="w-3 h-3 text-[#C29B38]" />
+                                    <span>Print Authenticity Card</span>
+                                  </button>
+                                )}
+                                <div className="font-mono font-bold text-[#1B382B]">
+                                  {formatNZD(item.priceCents * item.quantity)}
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -1599,6 +1725,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </h1>
               </div>
 
+              {profileError && (
+                <div className="p-2.5 rounded-lg bg-[#A63A2A]/10 border border-[#A63A2A]/30 text-[#A63A2A] text-xs font-medium">
+                  {profileError}
+                </div>
+              )}
+
               <form onSubmit={handleSaveProfile} className="space-y-4 text-xs">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1">
@@ -1741,7 +1873,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     {effectiveSection === 'admin-couriers' && 'Courier Rates, Promos & Gift Cards'}
                     {effectiveSection === 'admin-catalogue' && 'Stone Inventory & Provenance'}
                     {effectiveSection === 'admin-settings' && 'Site, Branding & Auth Settings'}
-                    {effectiveSection === 'admin-payments' && 'Payment Modes, Cash on Pickup & Stripe'}
+                    {effectiveSection === 'admin-payments' && 'Payment Modes, Stripe, PayPal & Cash on Pickup'}
                     {effectiveSection === 'admin-seo' && 'Global SEO & Open Graph Meta Tags'}
                     {effectiveSection === 'admin-seo-audit' && 'Sitemap & Per-Page SEO Audit'}
                   </h1>
@@ -1798,6 +1930,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           )}
         </div>
       </div>
+      <CertificatePrintModal
+        isOpen={Boolean(certPreviewModal)}
+        onClose={() => setCertPreviewModal(null)}
+        certificates={certPreviewModal?.certificates || []}
+        settings={settings}
+        orderNumber={certPreviewModal?.orderNumber}
+        initialProductId={certPreviewModal?.initialProductId}
+      />
     </div>
   );
 };

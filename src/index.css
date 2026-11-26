@@ -91,3 +91,63 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #1b382b;
 }
+
+/* Double-sided 90mm x 55mm Certificate of Authenticity Card Printing */
+#certificate-print-portal,
+.certificate-print-portal {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+
+  body.printing-certificate-cards > *:not(#certificate-print-portal):not(.certificate-print-portal) {
+    display: none !important;
+  }
+
+  body.printing-certificate-cards {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.printing-certificate-cards #certificate-print-portal,
+  body.printing-certificate-cards .certificate-print-portal {
+    display: block !important;
+  }
+
+  .certificate-print-page {
+    width: 210mm;
+    height: 297mm;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 32mm;
+    page-break-after: always;
+    break-after: page;
+    background: #ffffff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .certificate-print-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  .certificate-card-face {
+    width: 90mm !important;
+    height: 55mm !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+

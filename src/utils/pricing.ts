@@ -185,9 +185,15 @@ export function priceCart({
 
   const totalCents = Math.max(0, preGiftCardTotalCents - giftCardAppliedCents);
 
-  // Stripe NZ standard processing fee: 2.7% + 30 cents on remaining Stripe balance
+  // Gateway fee estimate: Stripe NZ ~2.7% + $0.30 NZD; PayPal NZ ~3.4% + $0.45 NZD
   const estimatedStripeFeeCents =
-    paymentMethod === 'STRIPE' && totalCents > 0 ? Math.round(totalCents * 0.027 + 30) : 0;
+    totalCents <= 0
+      ? 0
+      : paymentMethod === 'STRIPE'
+      ? Math.round(totalCents * 0.027 + 30)
+      : paymentMethod === 'PAYPAL'
+      ? Math.round(totalCents * 0.034 + 45)
+      : 0;
   const estimatedNetReceivedCents = Math.max(0, totalCents - estimatedStripeFeeCents);
 
   return {

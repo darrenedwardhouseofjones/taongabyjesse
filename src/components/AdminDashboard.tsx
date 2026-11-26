@@ -36,10 +36,14 @@ import {
   Banknote,
   MapPin,
   Gift,
+  Award,
+  Printer,
+  Wallet,
 } from 'lucide-react';
 import { DEFAULT_SITE_SETTINGS } from '../utils/defaults';
 import {
   AdminPaymentSettingsView,
+  CertificateRecord,
   Courier,
   CourierRate,
   CustomCommission,
@@ -62,6 +66,26 @@ import { formatNZD, PACKAGE_SIZES } from '../utils/pricing';
 import { downloadOrdersCsv } from '../utils/ordersCsv';
 import { apiFetch } from '../utils/api';
 import { SeoAuditSection } from './SeoAuditSection';
+import { CertificatePrintModal } from './CertificateOfAuthenticity';
+import { TaongaGrowthChart } from './TaongaGrowthChart';
+import {
+  adminGiftCardCreateSchema,
+  bulkRaiseRatesSchema,
+  commissionAdminUpdateSchema,
+  commissionMessageSchema,
+  courierRatePatchSchema,
+  customPricingConfigSchema,
+  discountRuleSchema,
+  galleryItemSchema,
+  orderRefundSchema,
+  orderTrackingUpdateSchema,
+  paymentSettingsSchema,
+  policiesSettingsSchema,
+  productPayloadSchema,
+  seoSettingsSchema,
+  siteSettingsUpdateSchema,
+  validateWithSchema,
+} from '../validation/schemas';
 
 interface AdminDashboardProps {
   orders: Order[];
@@ -232,6 +256,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     message: string;
   } | null>(null);
   const [testingStripe, setTestingStripe] = useState(false);
+  const [paypalEnabledDraft, setPaypalEnabledDraft] = useState(settings.paypalEnabled ?? true);
+  const [paypalModeDraft, setPaypalModeDraft] = useState<'sandbox' | 'live'>(
+    settings.paypalMode || 'sandbox'
+  );
+  const [paypalClientIdDraft, setPaypalClientIdDraft] = useState(settings.paypalClientId || '');
+  const [paypalSecretInput, setPaypalSecretInput] = useState('');
+  const [paypalWebhookIdInput, setPaypalWebhookIdInput] = useState('');
+  const [paypalWebhookCopied, setPaypalWebhookCopied] = useState(false);
+  const [paypalTestResult, setPaypalTestResult] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const [testingPaypal, setTestingPaypal] = useState(false);
 
   // Refund Modal State
   const [refundingOrder, setRefundingOrder] = useState<Order | null>(null);
@@ -256,6 +293,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     allowSearchIndexing: settings.allowSearchIndexing ?? true,
   });
   const [seoSavedToast, setSeoSavedToast] = useState(false);
+  const [seoError, setSeoError] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsSavedToast, setSettingsSavedToast] = useState(false);
+  const [courierError, setCourierError] = useState<string | null>(null);
   const [sitemapRegenerating, setSitemapRegenerating] = useState(false);
   const [sitemapNotice, setSitemapNotice] = useState<string | null>(null);
 
@@ -330,17 +371,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleSavePolicies = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPoliciesSaving(true);
     setPoliciesError(null);
+    const parsed = validateWithSchema(policiesSettingsSchema, policiesDraft);
+    if (!parsed.success) {
+      setPoliciesError(parsed.error);
+      return;
+    }
+
+    setPoliciesSaving(true);
     try {
       await onUpdateSettings({
         ...settings,
-        termsAndConditionsText: policiesDraft.termsAndConditionsText.trim(),
-        privacyPolicyText: policiesDraft.privacyPolicyText.trim(),
-        shippingAndReturnsPolicyText: policiesDraft.shippingAndReturnsPolicyText.trim(),
-        customCommissionsPolicyText: policiesDraft.customCommissionsPolicyText.trim(),
-        authenticityPolicyText: policiesDraft.authenticityPolicyText.trim(),
-        returnPolicyDays: Math.max(0, Number(policiesDraft.returnPolicyDays) || 0),
+        ...parsed.data,
       });
       setPoliciesSavedToast(true);
       setTimeout(() => setPoliciesSavedToast(false), 3500);
@@ -371,6 +413,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setStripeModeDraft(ps.stripeMode);
         setPublishableKeyDraft(ps.stripePublishableKey || '');
         setStatementDescriptorDraft(ps.stripeStatementDescriptor || 'POUNAMU ATELIER');
+        setPaypalEnabledDraft(ps.paypalEnabled ?? true);
+        setPaypalModeDraft(ps.paypalMode || 'sandbox');
+        setPaypalClientIdDraft(ps.paypalClientId || '');
       })
       .catch((err) => {
         if (!active) return;
@@ -386,35 +431,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleSavePaymentSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    setPaymentSaving(true);
     setPaymentError(null);
     setTestResult(null);
+    setPaypalTestResult(null);
+    const parsed = validateWithSchema(paymentSettingsSchema, {
+      stripeEnabled: stripeEnabledDraft,
+      cashOnPickupEnabled: cashOnPickupEnabledDraft,
+      cashOnPickupInstructions: cashOnPickupInstructionsDraft.trim(),
+      stripeMode: stripeModeDraft,
+      stripePublishableKey: publishableKeyDraft.trim(),
+      stripeStatementDescriptor: statementDescriptorDraft.trim(),
+      ...(secretKeyInput.trim() ? { stripeSecretKey: secretKeyInput.trim() } : {}),
+      ...(webhookSecretInput.trim()
+        ? { stripeWebhookSecret: webhookSecretInput.trim() }
+        : {}),
+      paypalEnabled: paypalEnabledDraft,
+      paypalMode: paypalModeDraft,
+      paypalClientId: paypalClientIdDraft.trim(),
+      ...(paypalSecretInput.trim() ? { paypalClientSecret: paypalSecretInput.trim() } : {}),
+      ...(paypalWebhookIdInput.trim() ? { paypalWebhookId: paypalWebhookIdInput.trim() } : {}),
+    });
+    if (!parsed.success) {
+      setPaymentError(parsed.error);
+      return;
+    }
+
+    setPaymentSaving(true);
     try {
       const res = await apiFetch<{
         paymentSettings: AdminPaymentSettingsView;
         settings: SiteSettings;
       }>('/api/admin/payment-settings', {
         method: 'PUT',
-        body: JSON.stringify({
-          stripeEnabled: stripeEnabledDraft,
-          cashOnPickupEnabled: cashOnPickupEnabledDraft,
-          cashOnPickupInstructions: cashOnPickupInstructionsDraft.trim(),
-          stripeMode: stripeModeDraft,
-          stripePublishableKey: publishableKeyDraft.trim(),
-          stripeStatementDescriptor: statementDescriptorDraft.trim(),
-          ...(secretKeyInput.trim() ? { stripeSecretKey: secretKeyInput.trim() } : {}),
-          ...(webhookSecretInput.trim()
-            ? { stripeWebhookSecret: webhookSecretInput.trim() }
-            : {}),
-        }),
+        body: JSON.stringify(parsed.data),
       });
       setPaymentView(res.paymentSettings);
       setCashOnPickupEnabledDraft(res.paymentSettings.cashOnPickupEnabled ?? true);
       setCashOnPickupInstructionsDraft(
         res.paymentSettings.cashOnPickupInstructions || ''
       );
+      setPaypalEnabledDraft(res.paymentSettings.paypalEnabled ?? true);
+      setPaypalModeDraft(res.paymentSettings.paypalMode || 'sandbox');
+      setPaypalClientIdDraft(res.paymentSettings.paypalClientId || '');
       setSecretKeyInput('');
       setWebhookSecretInput('');
+      setPaypalSecretInput('');
+      setPaypalWebhookIdInput('');
       onUpdateSettings(res.settings);
       setPaymentSavedToast(true);
       setTimeout(() => setPaymentSavedToast(false), 3500);
@@ -425,18 +487,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleClearSecret = async (which: 'secret' | 'webhook') => {
+  const handleClearSecret = async (
+    which: 'secret' | 'webhook' | 'paypal_secret' | 'paypal_webhook'
+  ) => {
     setPaymentSaving(true);
     setPaymentError(null);
+    const body =
+      which === 'secret'
+        ? { clearSecretKey: true }
+        : which === 'webhook'
+        ? { clearWebhookSecret: true }
+        : which === 'paypal_secret'
+        ? { clearPaypalSecret: true }
+        : { clearPaypalWebhookId: true };
     try {
       const res = await apiFetch<{
         paymentSettings: AdminPaymentSettingsView;
         settings: SiteSettings;
       }>('/api/admin/payment-settings', {
         method: 'PUT',
-        body: JSON.stringify(
-          which === 'secret' ? { clearSecretKey: true } : { clearWebhookSecret: true }
-        ),
+        body: JSON.stringify(body),
       });
       setPaymentView(res.paymentSettings);
       onUpdateSettings(res.settings);
@@ -478,19 +548,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleTestPayPalConnection = async () => {
+    setTestingPaypal(true);
+    setPaypalTestResult(null);
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        mode: 'sandbox' | 'live';
+        hasClientId: boolean;
+        hasWebhookId: boolean;
+      }>('/api/admin/payment-settings/test-paypal', {
+        method: 'POST',
+      });
+      setPaypalTestResult({
+        ok: true,
+        message: `PayPal OAuth connected (${res.mode.toUpperCase()} mode). Client ID: ${
+          res.hasClientId ? 'OK' : 'Missing'
+        }, Webhook ID: ${res.hasWebhookId ? 'OK' : 'Not Set'}.`,
+      });
+    } catch (err) {
+      setPaypalTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : 'PayPal API connection failed.',
+      });
+    } finally {
+      setTestingPaypal(false);
+    }
+  };
+
   const handleExecuteRefund = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!refundingOrder) return;
-    setRefundProcessing(true);
     setRefundError(null);
+    const amountCents = Math.round(parseFloat(refundAmountNzd || '0') * 100);
+    const parsed = validateWithSchema(orderRefundSchema, {
+      amountCents: amountCents > 0 ? amountCents : undefined,
+      reason: refundReason,
+    });
+    if (!parsed.success) {
+      setRefundError(parsed.error);
+      return;
+    }
+
+    setRefundProcessing(true);
     try {
-      const amountCents = Math.round(parseFloat(refundAmountNzd || '0') * 100);
       const res = await apiFetch<{ order: Order }>(`/api/orders/${refundingOrder.id}/refund`, {
         method: 'POST',
-        body: JSON.stringify({
-          amountCents: amountCents > 0 ? amountCents : undefined,
-          reason: refundReason,
-        }),
+        body: JSON.stringify(parsed.data),
       });
       onUpdateOrder(res.order);
       setRefundingOrder(null);
@@ -519,7 +623,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
   const [copiedTrackingOrderId, setCopiedTrackingOrderId] = useState<string | null>(null);
   const [updatingStatusOrderId, setUpdatingStatusOrderId] = useState<string | null>(null);
+  const [downloadingCertOrderId, setDownloadingCertOrderId] = useState<string | null>(null);
+  const [certPreviewModal, setCertPreviewModal] = useState<{
+    orderNumber: string;
+    initialProductId?: string;
+    certificates: CertificateRecord[];
+  } | null>(null);
   const [orderEmailLogs, setOrderEmailLogs] = useState<OrderEmailLog[]>([]);
+
+  const handleOpenCertificatesModal = async (order: Order, focusProductId?: string) => {
+    if (downloadingCertOrderId) return;
+    setDownloadingCertOrderId(order.id);
+    setTrackingError(null);
+    try {
+      const res = await apiFetch<{ certificates: CertificateRecord[]; order?: Order }>(
+        `/api/orders/${encodeURIComponent(order.id)}/certificates`
+      );
+      if (res.order) {
+        await onUpdateOrder(res.order);
+      }
+      if (!res.certificates || res.certificates.length === 0) {
+        setTrackingError(`No certificates issued for ${order.orderNumber} yet.`);
+        return;
+      }
+      setCertPreviewModal({
+        orderNumber: order.orderNumber,
+        initialProductId: focusProductId,
+        certificates: res.certificates,
+      });
+    } catch (err) {
+      setTrackingError(
+        err instanceof Error ? err.message : 'Unable to load certificate cards.'
+      );
+    } finally {
+      setDownloadingCertOrderId(null);
+    }
+  };
 
   const refreshOrderEmailLogs = async () => {
     if (!isAdmin) return;
@@ -589,10 +728,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [commLeadWeeksDraft, setCommLeadWeeksDraft] = useState('3');
   const [commSaving, setCommSaving] = useState(false);
   const [commSavedToast, setCommSavedToast] = useState(false);
+  const [commError, setCommError] = useState<string | null>(null);
   const [commReplyText, setCommReplyText] = useState('');
   const [pricingDraft, setPricingDraft] = useState<CustomPricingConfig>(customPricing);
   const [pricingSaving, setPricingSaving] = useState(false);
   const [pricingSavedToast, setPricingSavedToast] = useState(false);
+  const [pricingError, setPricingError] = useState<string | null>(null);
   const [newStoneName, setNewStoneName] = useState('');
   const [newStoneDesc, setNewStoneDesc] = useState('');
   const [newStonePriceNzd, setNewStonePriceNzd] = useState('320');
@@ -726,24 +867,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const order = orders.find((o) => o.id === orderId);
     if (!order) return;
 
-    const cleanTracking = trackingNumberInput.trim();
-    if (!cleanTracking) {
-      setTrackingError('Please enter a valid courier tracking number.');
+    const parsedCost = parseFloat(actualCostInput || '0');
+    const parsed = validateWithSchema(orderTrackingUpdateSchema, {
+      trackingNumber: trackingNumberInput,
+      actualCourierCostCents:
+        Number.isFinite(parsedCost) && parsedCost >= 0
+          ? Math.round(parsedCost * 100)
+          : order.actualCourierCostCents || 0,
+    });
+    if (!parsed.success) {
+      setTrackingError(parsed.error);
       return;
     }
 
-    const parsedCost = parseFloat(actualCostInput || '0');
-    const actualCents =
-      Number.isFinite(parsedCost) && parsedCost >= 0
-        ? Math.round(parsedCost * 100)
-        : order.actualCourierCostCents || 0;
-
+    const cleanTracking = parsed.data.trackingNumber;
     const wasAlreadyShipped = order.status === 'SHIPPED';
     const updated: Order = {
       ...order,
       status: wasAlreadyShipped ? order.status : 'SHIPPED',
       trackingNumber: cleanTracking,
-      actualCourierCostCents: actualCents,
+      actualCourierCostCents: parsed.data.actualCourierCostCents,
       shippedAt: order.shippedAt || new Date().toISOString(),
     };
 
@@ -955,7 +1098,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="font-display text-xl font-bold text-[#2D5A46] tabular-nums">
                 {formatNZD(estimatedProfitCents)}
               </div>
-              <div className="text-[10px] text-[#526058]">Stripe fees: {formatNZD(totalStripeFeesCents)}</div>
+              <div className="text-[10px] text-[#526058]">Gateway fees: {formatNZD(totalStripeFeesCents)}</div>
             </div>
 
             <div className="p-4 bg-white rounded-xl border border-[#E8E2D6] space-y-1">
@@ -966,6 +1109,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="text-[10px] text-[#526058]">Postage Margin: {formatNZD(postageMarginCents)}</div>
             </div>
           </div>
+
+          {/* Interactive D3 Taonga by Jesse Growth Analytics */}
+          <TaongaGrowthChart
+            orders={orders}
+            commissions={commissions}
+            products={products}
+            onNavigateTab={(tab) => setActiveTab(tab)}
+          />
 
           {/* "Needs Attention" Queue */}
           <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-4">
@@ -989,7 +1140,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   {unfulfilledOrders.length} Orders Awaiting Packing &amp; Pickup
                 </div>
                 <div className="text-[11px] text-[#526058]">
-                  Orders placed via Stripe or Cash on Pickup awaiting packing, courier labels, or studio collection.
+                  Orders placed via Stripe, PayPal, or Cash on Pickup awaiting packing, courier labels, or studio collection.
                 </div>
                 <button
                   onClick={() => setActiveTab('orders')}
@@ -1167,13 +1318,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               {isCashPickup ? o.customerPhone : o.shippingAddress.city} · {o.customerEmail}
                             </div>
                           </td>
-                          <td className="p-3">
-                            <div className="text-[11px]">
-                              {o.items.map((i) => i.title).join(', ')}
-                            </div>
-                            <div className="text-[10px] font-mono text-[#2D5A46]">
-                              {o.items.map((i) => i.authenticityCode).join(', ')}
-                            </div>
+                          <td className="p-3 space-y-1.5">
+                            {o.items.map((i, idx) => (
+                              <div key={`${i.productId}-${idx}`} className="space-y-0.5">
+                                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                  <span className="font-medium text-[#18231C]">
+                                    {i.title}
+                                    {i.quantity > 1 ? ` ×${i.quantity}` : ''}
+                                  </span>
+                                  {o.status !== 'PENDING' && (
+                                    <button
+                                      type="button"
+                                      disabled={downloadingCertOrderId === o.id}
+                                      onClick={() => void handleOpenCertificatesModal(o, i.productId)}
+                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#C29B38]/60 bg-[#FAF9F6] hover:bg-[#EFE9DC] text-[10px] font-semibold text-[#18231C] cursor-pointer disabled:opacity-50"
+                                    >
+                                      <Printer className="w-2.5 h-2.5 text-[#C29B38]" />
+                                      <span>Print Authenticity Card</span>
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="text-[10px] font-mono text-[#2D5A46]">
+                                  {i.authenticityCode}
+                                </div>
+                                {i.certificateNumbers && i.certificateNumbers.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {i.certificateNumbers.map((cn) => (
+                                      <span
+                                        key={cn}
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-[#1B382B]/10 text-[#1B382B] font-mono text-[9px] font-semibold"
+                                      >
+                                        <Award className="w-2.5 h-2.5 text-[#C29B38]" />
+                                        {cn}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
                           </td>
                           <td className="p-3 space-y-0.5">
                             <div className="font-semibold text-[#18231C]">
@@ -1181,6 +1363,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 ? 'Digital Gift Card'
                                 : isCashPickup
                                 ? 'Cash on Pickup'
+                                : o.paymentMethod === 'PAYPAL'
+                                ? 'PayPal'
                                 : 'Stripe Card'}
                             </div>
                             <div className="text-[10px] text-[#526058]">
@@ -1305,9 +1489,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 </div>
                               );
                             })()}
-                            {o.stripePaymentIntentId && (
+                            {(o.stripePaymentIntentId ||
+                              o.paypalCaptureId ||
+                              o.paypalOrderId) && (
                               <div className="text-[10px] font-mono text-[#7D8B82]">
-                                {o.stripePaymentIntentId.slice(0, 14)}…
+                                {(
+                                  o.paypalCaptureId ||
+                                  o.paypalOrderId ||
+                                  o.stripePaymentIntentId ||
+                                  ''
+                                ).slice(0, 16)}
+                                …
                               </div>
                             )}
                           </td>
@@ -1347,6 +1539,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   </button>
                                 )}
                               </>
+                            )}
+                            {o.status !== 'PENDING' && (
+                              <button
+                                type="button"
+                                disabled={downloadingCertOrderId === o.id}
+                                onClick={() => void handleOpenCertificatesModal(o)}
+                                title="Preview, print double-sided, or download 90x55mm Certificate of Authenticity card"
+                                className="px-2.5 py-1 border border-[#C29B38]/60 bg-[#FAF9F6] text-[#18231C] hover:bg-[#EFE9DC] rounded text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              >
+                                <Printer className="w-3 h-3 text-[#C29B38]" />
+                                <span>
+                                  {downloadingCertOrderId === o.id
+                                    ? 'Loading...'
+                                    : 'Print Authenticity Card'}
+                                </span>
+                              </button>
                             )}
                             {o.status !== 'PENDING' && (o.refundedAmountCents || 0) < o.totalCents && (
                               <button
@@ -1471,7 +1679,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               >
                 <div className="space-y-1">
                   <h4 className="font-display font-bold text-sm text-[#18231C]">
-                    Issue Stripe Refund — {refundingOrder.orderNumber}
+                    Issue{' '}
+                    {refundingOrder.paymentMethod === 'PAYPAL'
+                      ? 'PayPal'
+                      : refundingOrder.paymentMethod === 'CASH_ON_PICKUP'
+                      ? 'Studio'
+                      : refundingOrder.paymentMethod === 'GIFT_CARD'
+                      ? 'Gift Card'
+                      : 'Stripe'}{' '}
+                    Refund — {refundingOrder.orderNumber}
                   </h4>
                   <p className="text-[11px] text-[#526058]">
                     Customer: {refundingOrder.customerName} ({refundingOrder.customerEmail}) · Paid{' '}
@@ -1503,7 +1719,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
 
                 <div className="space-y-1">
-                  <label className="font-semibold text-[#18231C] block">Stripe Refund Reason</label>
+                  <label className="font-semibold text-[#18231C] block">Refund Reason</label>
                   <select
                     value={refundReason}
                     onChange={(e) =>
@@ -1533,7 +1749,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     disabled={refundProcessing}
                     className="px-4 py-1.5 bg-[#A63A2A] hover:bg-[#8E2F21] text-white rounded-lg font-semibold cursor-pointer disabled:opacity-50"
                   >
-                    {refundProcessing ? 'Processing Refund...' : 'Confirm Stripe Refund'}
+                    {refundProcessing
+                      ? 'Processing Refund...'
+                      : refundingOrder.paymentMethod === 'PAYPAL'
+                      ? 'Confirm PayPal Refund'
+                      : refundingOrder.paymentMethod === 'STRIPE'
+                      ? 'Confirm Stripe Refund'
+                      : 'Confirm Refund'}
                   </button>
                 </div>
               </form>
@@ -1649,22 +1871,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <form
                         onSubmit={async (e) => {
                           e.preventDefault();
+                          setCommError(null);
+                          const quoteCents = commQuoteNzdDraft
+                            ? Math.round(parseFloat(commQuoteNzdDraft) * 100)
+                            : undefined;
+                          const depCents = commDepositNzdDraft
+                            ? Math.round(parseFloat(commDepositNzdDraft) * 100)
+                            : undefined;
+                          const parsed = validateWithSchema(commissionAdminUpdateSchema, {
+                            status: commStatusDraft,
+                            quoteAmountCents: quoteCents,
+                            depositAmountCents: depCents,
+                            leadTimeWeeks: parseInt(commLeadWeeksDraft, 10) || 3,
+                          });
+                          if (!parsed.success) {
+                            setCommError(parsed.error);
+                            return;
+                          }
+
                           setCommSaving(true);
                           try {
-                            const quoteCents = commQuoteNzdDraft
-                              ? Math.round(parseFloat(commQuoteNzdDraft) * 100)
-                              : undefined;
-                            const depCents = commDepositNzdDraft
-                              ? Math.round(parseFloat(commDepositNzdDraft) * 100)
-                              : undefined;
-                            await onUpdateCommission(activeAdminCommission.id, {
-                              status: commStatusDraft,
-                              quoteAmountCents: quoteCents,
-                              depositAmountCents: depCents,
-                              leadTimeWeeks: parseInt(commLeadWeeksDraft, 10) || 3,
-                            });
+                            await onUpdateCommission(activeAdminCommission.id, parsed.data);
                             setCommSavedToast(true);
                             setTimeout(() => setCommSavedToast(false), 3000);
+                          } catch (err) {
+                            setCommError(
+                              err instanceof Error ? err.message : 'Unable to update commission.'
+                            );
                           } finally {
                             setCommSaving(false);
                           }
@@ -1776,16 +2009,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </div>
                         ))}
                       </div>
+                      {commError && (
+                        <div className="mx-3 mb-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                          {commError}
+                        </div>
+                      )}
                       <form
                         onSubmit={async (e) => {
                           e.preventDefault();
-                          if (!commReplyText.trim()) return;
-                          await onSendCommissionMessage(
-                            activeAdminCommission.id,
-                            commReplyText.trim(),
-                            'carver'
-                          );
-                          setCommReplyText('');
+                          setCommError(null);
+                          const parsed = validateWithSchema(commissionMessageSchema, {
+                            text: commReplyText,
+                            sender: 'carver',
+                          });
+                          if (!parsed.success) {
+                            setCommError(parsed.error);
+                            return;
+                          }
+                          try {
+                            await onSendCommissionMessage(
+                              activeAdminCommission.id,
+                              parsed.data.text,
+                              'carver'
+                            );
+                            setCommReplyText('');
+                          } catch (err) {
+                            setCommError(
+                              err instanceof Error ? err.message : 'Unable to send reply.'
+                            );
+                          }
                         }}
                         className="p-3 border-t border-[#E8E2D6] flex gap-2 bg-[#FAF9F6]"
                       >
@@ -1845,33 +2097,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
+                  setPricingError(null);
+                  const materialBaseCents: Record<string, number> = {};
+                  stones.forEach((s) => {
+                    if (s.name.trim()) materialBaseCents[s.name.trim()] = s.baseCents;
+                  });
+                  const designMultiplier: Record<string, number> = {};
+                  designs.forEach((d) => {
+                    if (d.name.trim()) designMultiplier[d.name.trim()] = d.multiplier;
+                  });
+                  const nextConfig: CustomPricingConfig = {
+                    ...pricingDraft,
+                    stoneOptions: stones,
+                    designOptions: designs,
+                    sizeOptions: sizes,
+                    materialBaseCents,
+                    designMultiplier,
+                    sizeMultiplier: {
+                      small45: sizes[0]?.multiplier ?? pricingDraft.sizeMultiplier.small45,
+                      medium65: sizes[1]?.multiplier ?? pricingDraft.sizeMultiplier.medium65,
+                      large85: sizes[2]?.multiplier ?? pricingDraft.sizeMultiplier.large85,
+                    },
+                    cordOptions: cords,
+                    bindingOptions: bindings,
+                  };
+                  const parsed = validateWithSchema(customPricingConfigSchema, nextConfig);
+                  if (!parsed.success) {
+                    setPricingError(parsed.error);
+                    return;
+                  }
                   setPricingSaving(true);
                   try {
-                    const materialBaseCents: Record<string, number> = {};
-                    stones.forEach((s) => {
-                      if (s.name.trim()) materialBaseCents[s.name.trim()] = s.baseCents;
-                    });
-                    const designMultiplier: Record<string, number> = {};
-                    designs.forEach((d) => {
-                      if (d.name.trim()) designMultiplier[d.name.trim()] = d.multiplier;
-                    });
-                    await onUpdateCustomPricing({
-                      ...pricingDraft,
-                      stoneOptions: stones,
-                      designOptions: designs,
-                      sizeOptions: sizes,
-                      materialBaseCents,
-                      designMultiplier,
-                      sizeMultiplier: {
-                        small45: sizes[0]?.multiplier ?? pricingDraft.sizeMultiplier.small45,
-                        medium65: sizes[1]?.multiplier ?? pricingDraft.sizeMultiplier.medium65,
-                        large85: sizes[2]?.multiplier ?? pricingDraft.sizeMultiplier.large85,
-                      },
-                      cordOptions: cords,
-                      bindingOptions: bindings,
-                    });
+                    await onUpdateCustomPricing(nextConfig);
                     setPricingSavedToast(true);
                     setTimeout(() => setPricingSavedToast(false), 3000);
+                  } catch (err) {
+                    setPricingError(
+                      err instanceof Error ? err.message : 'Unable to save studio pricing.'
+                    );
                   } finally {
                     setPricingSaving(false);
                   }
@@ -1894,6 +2157,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </span>
                   )}
                 </div>
+
+                {pricingError && (
+                  <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                    {pricingError}
+                  </div>
+                )}
 
                 {/* 1. Stone Types */}
                 <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#E8E2D6] space-y-3">
@@ -2405,13 +2674,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => onBulkRaiseRates(5)}
+                onClick={() => {
+                  setCourierError(null);
+                  const parsed = validateWithSchema(bulkRaiseRatesSchema, { percent: 5 });
+                  if (!parsed.success) {
+                    setCourierError(parsed.error);
+                    return;
+                  }
+                  onBulkRaiseRates(parsed.data.percent);
+                }}
                 className="px-3.5 py-2 bg-[#FAF9F6] border border-[#E8E2D6] hover:bg-[#E8E2D6] text-xs font-semibold rounded-lg flex items-center gap-1.5 self-start cursor-pointer"
               >
                 <Percent className="w-3.5 h-3.5 text-[#1B382B]" />
                 <span>Raise All Courier Rates by +5%</span>
               </button>
             </div>
+
+            {courierError && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                {courierError}
+              </div>
+            )}
 
             {/* Matrix Table */}
             <div className="overflow-x-auto">
@@ -2454,12 +2737,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   <input
                                     type="number"
                                     step="0.50"
+                                    min="0"
                                     value={(priceCents / 100).toFixed(2)}
                                     onChange={(e) => {
-                                      if (rate) {
-                                        const val = parseFloat(e.target.value) || 0;
-                                        onUpdateRate(rate.id, Math.round(val * 100));
+                                      if (!rate) return;
+                                      const val = parseFloat(e.target.value);
+                                      const parsed = validateWithSchema(courierRatePatchSchema, {
+                                        priceCents: Number.isFinite(val) ? Math.round(val * 100) : -1,
+                                      });
+                                      if (!parsed.success) {
+                                        setCourierError(parsed.error);
+                                        return;
                                       }
+                                      setCourierError(null);
+                                      onUpdateRate(rate.id, parsed.data.priceCents);
                                     }}
                                     className="w-20 p-1 border border-[#E8E2D6] rounded font-mono text-xs focus:outline-none focus:border-[#1B382B]"
                                   />
@@ -2611,8 +2902,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onSubmit={async (e) => {
                 e.preventDefault();
                 setDiscError(null);
-                const cleanCode = discCode.trim().toUpperCase();
-                if (!cleanCode) return;
                 const rawVal = parseFloat(discValue) || 0;
                 const valCentsOrPct =
                   discType === 'PERCENTAGE'
@@ -2620,16 +2909,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     : discType === 'FIXED'
                     ? Math.round(rawVal * 100)
                     : 0;
+                const parsed = validateWithSchema(discountRuleSchema, {
+                  code: discCode,
+                  type: discType,
+                  value: valCentsOrPct,
+                  minSpendCents: Math.round((parseFloat(discMinSpend) || 0) * 100) || undefined,
+                  description:
+                    discDescription.trim() || `${discCode.trim().toUpperCase()} promotional discount`,
+                  isActive: true,
+                });
+                if (!parsed.success) {
+                  setDiscError(parsed.error);
+                  return;
+                }
                 try {
-                  await onSaveDiscount({
-                    code: cleanCode,
-                    type: discType,
-                    value: valCentsOrPct,
-                    minSpendCents: Math.round((parseFloat(discMinSpend) || 0) * 100) || undefined,
-                    description:
-                      discDescription.trim() || `${cleanCode} promotional discount`,
-                    isActive: true,
-                  });
+                  await onSaveDiscount(parsed.data);
                   setDiscCode('');
                   setDiscDescription('');
                 } catch (err) {
@@ -2794,20 +3088,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setGcError(null);
                   setGcNotice(null);
                   const cents = Math.round((parseFloat(gcAmountNzd) || 0) * 100);
-                  if (cents < 500 || cents > 500000) {
-                    setGcError('Gift card value must be between $5.00 and $5,000.00 NZD.');
+                  const parsed = validateWithSchema(adminGiftCardCreateSchema, {
+                    amountCents: cents,
+                    recipientName: gcRecipientName,
+                    recipientEmail: gcRecipientEmail,
+                    message: gcMessage.trim() || undefined,
+                    code: gcCustomCode.trim().toUpperCase() || undefined,
+                    sendEmail: true,
+                  });
+                  if (!parsed.success) {
+                    setGcError(parsed.error);
                     return;
                   }
                   setGcSaving(true);
                   try {
-                    const created = await onCreateAdminGiftCard({
-                      amountCents: cents,
-                      recipientName: gcRecipientName.trim(),
-                      recipientEmail: gcRecipientEmail.trim(),
-                      message: gcMessage.trim() || undefined,
-                      code: gcCustomCode.trim().toUpperCase() || undefined,
-                      sendEmail: true,
-                    });
+                    const created = await onCreateAdminGiftCard(parsed.data);
                     setGcNotice(
                       `Issued active gift card ${created.code} (${formatNZD(created.initialAmountCents)}) for ${created.recipientEmail}.`
                     );
@@ -2940,6 +3235,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               ? 'Cash on Pickup'
                               : gc.purchasePaymentMethod === 'ADMIN_ISSUED'
                               ? 'Admin Issued'
+                              : gc.purchasePaymentMethod === 'PAYPAL'
+                              ? 'PayPal'
                               : 'Stripe'}
                           </div>
                         </td>
@@ -3073,43 +3370,47 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <form
             onSubmit={async (e) => {
               e.preventDefault();
-              if (!newTitle.trim()) return;
               setProductActionError(null);
+              const qty = Math.max(0, parseInt(newQty, 10) || 1);
+              const prod: Product = {
+                id: `prod-${Date.now()}`,
+                sku: newSku.trim() || `SKU-${Math.floor(100 + Math.random() * 900)}`,
+                title: newTitle.trim(),
+                slug: newTitle
+                  .trim()
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, '-')
+                  .replace(/(^-|-$)/g, ''),
+                priceCents: Math.round((parseFloat(newPrice) || 0) * 100),
+                costPriceCents: Math.round((parseFloat(newCost) || 0) * 100),
+                weightGrams: parseInt(newWeight, 10) || 75,
+                defaultPackageSize: newPkgSize,
+                quantity: qty,
+                isUniquePiece: newIsUnique,
+                isMadeToOrder: newIsMadeToOrder,
+                material: newMaterial,
+                designType: newDesign,
+                authenticityCode: newCode.trim(),
+                originRiver: newRiver.trim(),
+                isExportRestricted: newIsExportRestricted || newMaterial === 'Whale Bone',
+                description:
+                  newDescription.trim() ||
+                  `Master carved ${newMaterial} ${newDesign} by Jesse.`,
+                spiritualMeaning: 'Symbol of mana, courage, and safe travel across Aotearoa.',
+                dimensions: '60mm × 25mm × 7mm',
+                cordDetails: 'Traditional 4-plait black cord',
+                carverName: 'Jesse',
+                images: [newImage.trim() || '/src/assets/images/product_toki_pounamu_1794468031889.jpg'],
+                featured: true,
+                published: true,
+              };
+              const parsed = validateWithSchema(productPayloadSchema, prod);
+              if (!parsed.success) {
+                setProductActionError(parsed.error);
+                return;
+              }
               setProductSaving(true);
               try {
-                const qty = Math.max(0, parseInt(newQty, 10) || 1);
-                const prod: Product = {
-                  id: `prod-${Date.now()}`,
-                  sku: newSku.trim() || `SKU-${Math.floor(100 + Math.random() * 900)}`,
-                  title: newTitle.trim(),
-                  slug: newTitle
-                    .trim()
-                    .toLowerCase()
-                    .replace(/[^a-z0-9]+/g, '-')
-                    .replace(/(^-|-$)/g, ''),
-                  priceCents: Math.round((parseFloat(newPrice) || 0) * 100),
-                  costPriceCents: Math.round((parseFloat(newCost) || 0) * 100),
-                  weightGrams: parseInt(newWeight, 10) || 75,
-                  defaultPackageSize: newPkgSize,
-                  quantity: qty,
-                  isUniquePiece: newIsUnique,
-                  isMadeToOrder: newIsMadeToOrder,
-                  material: newMaterial,
-                  designType: newDesign,
-                  authenticityCode: newCode.trim(),
-                  originRiver: newRiver.trim(),
-                  isExportRestricted: newIsExportRestricted || newMaterial === 'Whale Bone',
-                  description:
-                    newDescription.trim() ||
-                    `Master carved ${newMaterial} ${newDesign} by Jesse.`,
-                  spiritualMeaning: 'Symbol of mana, courage, and safe travel across Aotearoa.',
-                  dimensions: '60mm × 25mm × 7mm',
-                  cordDetails: 'Traditional 4-plait black cord',
-                  carverName: 'Jesse',
-                  images: [newImage.trim() || '/src/assets/images/product_toki_pounamu_1794468031889.jpg'],
-                  featured: true,
-                  published: true,
-                };
                 await onAddProduct(prod);
                 setNewTitle('');
                 setNewSku('');
@@ -3395,6 +3696,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
+                  setProductActionError(null);
+                  const parsed = validateWithSchema(productPayloadSchema, editingProduct);
+                  if (!parsed.success) {
+                    setProductActionError(parsed.error);
+                    return;
+                  }
                   setProductSaving(true);
                   try {
                     await onUpdateProduct(editingProduct);
@@ -3609,10 +3916,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </label>
                 </div>
 
+                {productActionError && (
+                  <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                    {productActionError}
+                  </div>
+                )}
+
                 <div className="flex justify-end gap-2 pt-2 border-t border-[#E8E2D6]">
                   <button
                     type="button"
-                    onClick={() => setEditingProduct(null)}
+                    onClick={() => {
+                      setProductActionError(null);
+                      setEditingProduct(null);
+                    }}
                     className="px-4 py-2 border border-[#E8E2D6] rounded-lg cursor-pointer"
                   >
                     Cancel
@@ -3650,21 +3966,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (!galTitle.trim()) return;
                 setGalError(null);
+                const parsed = validateWithSchema(galleryItemSchema, {
+                  title: galTitle,
+                  material: galMaterial,
+                  designType: galDesign,
+                  originRiver: galOrigin,
+                  authenticityCode: galCode,
+                  carvedYear: galYear,
+                  imageUrl: galImage,
+                  description:
+                    galDescription.trim() ||
+                    `Past heirloom ${galMaterial} ${galDesign} carved by Jesse.`,
+                });
+                if (!parsed.success) {
+                  setGalError(parsed.error);
+                  return;
+                }
                 setGalSaving(true);
                 try {
                   await onAddGalleryItem({
-                    title: galTitle.trim(),
-                    material: galMaterial,
-                    designType: galDesign,
-                    originRiver: galOrigin.trim(),
-                    authenticityCode: galCode.trim(),
-                    carvedYear: galYear.trim(),
-                    imageUrl: galImage.trim(),
-                    description:
-                      galDescription.trim() ||
-                      `Past heirloom ${galMaterial} ${galDesign} carved by Jesse.`,
+                    title: parsed.data.title,
+                    material: parsed.data.material,
+                    designType: parsed.data.designType,
+                    originRiver: parsed.data.originRiver || '',
+                    authenticityCode: parsed.data.authenticityCode || '',
+                    carvedYear: parsed.data.carvedYear || '',
+                    imageUrl: parsed.data.imageUrl || '',
+                    description: parsed.data.description || '',
                   });
                   setGalTitle('');
                   setGalDescription('');
@@ -4213,20 +4542,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
 
+            {settingsError && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+                {settingsError}
+              </div>
+            )}
+
             {/* Persistence & Save Indicator */}
-            <div className="pt-2 border-t border-[#E8E2D6] flex items-center justify-between text-xs text-[#526058]">
+            <div className="pt-2 border-t border-[#E8E2D6] flex flex-wrap items-center justify-between gap-3 text-xs text-[#526058]">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                 <span className="font-medium text-[#1B382B]">Synced with SQLite database</span>
                 <span className="text-[#7D8B82]">— settings persist across restarts</span>
               </div>
-              <button
-                type="button"
-                onClick={() => onUpdateSettings({ ...settings })}
-                className="py-1.5 px-3 bg-[#1B382B] text-white rounded-lg text-xs font-semibold hover:bg-[#2D5A46] transition-colors shadow-xs cursor-pointer"
-              >
-                Save Settings
-              </button>
+              <div className="flex items-center gap-3">
+                {settingsSavedToast && (
+                  <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Settings Saved
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettingsError(null);
+                    const parsed = validateWithSchema(siteSettingsUpdateSchema, settings);
+                    if (!parsed.success) {
+                      setSettingsError(parsed.error);
+                      return;
+                    }
+                    onUpdateSettings({ ...settings });
+                    setSettingsSavedToast(true);
+                    setTimeout(() => setSettingsSavedToast(false), 3000);
+                  }}
+                  className="py-1.5 px-3 bg-[#1B382B] text-white rounded-lg text-xs font-semibold hover:bg-[#2D5A46] transition-colors shadow-xs cursor-pointer"
+                >
+                  Save Settings
+                </button>
+              </div>
             </div>
           </div>
 
@@ -4532,7 +4885,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* TAB: ADMIN-ONLY STRIPE PAYMENT & WEBHOOK SETTINGS */}
+      {/* TAB: ADMIN-ONLY PAYMENT & WEBHOOK SETTINGS (STRIPE, PAYPAL & CASH ON PICKUP) */}
       {activeTab === 'payments' && (
         <div className="space-y-6 max-w-4xl text-xs">
           {/* Security & Webhook Status Header */}
@@ -4540,15 +4893,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="flex items-center gap-2.5 text-[#18231C]">
               <Lock className="w-4 h-4 text-[#2D5A46] shrink-0" />
               <span>
-                <strong>PCI SAQ A Security:</strong> Secret keys (
-                <code className="font-mono text-[11px] bg-white px-1 rounded border border-[#E8E2D6]">
-                  sk_...
-                </code>
-                ) and webhook signing secrets (
-                <code className="font-mono text-[11px] bg-white px-1 rounded border border-[#E8E2D6]">
-                  whsec_...
-                </code>
-                ) are stored strictly server-side in SQLite and never sent to storefront visitors.
+                <strong>Hosted Checkout Security:</strong> Stripe secret keys (<code className="font-mono text-[11px] bg-white px-1 rounded border border-[#E8E2D6]">sk_...</code> / <code className="font-mono text-[11px] bg-white px-1 rounded border border-[#E8E2D6]">whsec_...</code>) and PayPal Client Secrets / Webhook IDs are stored strictly server-side in SQLite and never sent to storefront visitors.
               </span>
             </div>
             {paymentSavedToast && (
@@ -4931,6 +5276,268 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* PayPal Checkout Gateway (NZD) */}
+            <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-5 shadow-xs">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[#E8E2D6] pb-4">
+                <div>
+                  <h3 className="font-display text-base font-bold text-[#18231C] flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-[#1B382B]" />
+                    PayPal Checkout Gateway (NZD)
+                  </h3>
+                  <p className="text-[#526058] mt-0.5">
+                    Accept PayPal Wallet, PayPal Balance, and PayPal-hosted cards in NZD alongside Stripe.
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <span className="font-semibold text-[#18231C]">
+                    {paypalEnabledDraft ? 'PayPal Enabled' : 'PayPal Paused'}
+                  </span>
+                  <div className="relative inline-flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={paypalEnabledDraft}
+                      onChange={(e) => setPaypalEnabledDraft(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-10 h-5.5 bg-[#D1C7B7] rounded-full peer peer-checked:bg-[#1B382B] after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4.5 after:w-4.5 after:transition-all peer-checked:after:translate-x-4.5" />
+                  </div>
+                </label>
+              </div>
+
+              {paymentLoading ? (
+                <div className="py-8 text-center text-[#526058]">Loading PayPal status...</div>
+              ) : (
+                <div className="space-y-5">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="font-semibold text-[#18231C] block">
+                        PayPal Environment Mode
+                      </label>
+                      <div className="grid grid-cols-2 gap-2 p-1 bg-[#FAF9F6] rounded-xl border border-[#E8E2D6]">
+                        <button
+                          type="button"
+                          onClick={() => setPaypalModeDraft('sandbox')}
+                          className={`py-2 rounded-lg font-semibold transition-colors cursor-pointer ${
+                            paypalModeDraft === 'sandbox'
+                              ? 'bg-[#C29B38] text-white shadow-xs'
+                              : 'text-[#526058] hover:text-[#18231C]'
+                          }`}
+                        >
+                          Sandbox Mode
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPaypalModeDraft('live')}
+                          className={`py-2 rounded-lg font-semibold transition-colors cursor-pointer ${
+                            paypalModeDraft === 'live'
+                              ? 'bg-[#1B382B] text-white shadow-xs'
+                              : 'text-[#526058] hover:text-[#18231C]'
+                          }`}
+                        >
+                          Live Production
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="paypal-client-id" className="font-semibold text-[#18231C] flex items-center justify-between">
+                        <span>PayPal Client ID</span>
+                        <span className="text-[11px] font-mono text-[#526058]">
+                          {paypalClientIdDraft ? 'Client ID set' : 'Required for Smart Buttons'}
+                        </span>
+                      </label>
+                      <input
+                        id="paypal-client-id"
+                        type="text"
+                        value={paypalClientIdDraft}
+                        onChange={(e) => setPaypalClientIdDraft(e.target.value)}
+                        placeholder="PayPal REST App Client ID..."
+                        className="w-full p-2.5 border border-[#E8E2D6] rounded-lg font-mono focus:outline-none focus:border-[#1B382B]"
+                      />
+                    </div>
+                  </div>
+
+                  {/* PayPal Client Secret (Write-only) */}
+                  <div className="p-4 rounded-xl border border-[#E8E2D6] bg-[#FAF9F6]/70 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label htmlFor="paypal-secret" className="font-bold text-[#18231C] flex items-center gap-1.5">
+                        <KeyRound className="w-3.5 h-3.5 text-[#1B382B]" />
+                        PayPal Client Secret (Server-Side Only)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {paymentView?.hasPaypalSecret ? (
+                          <span className="px-2 py-0.5 rounded-full bg-[#2D5A46]/15 text-[#2D5A46] font-mono text-[10px] font-bold">
+                            Configured ({paymentView.paypalSecretSource}): {paymentView.paypalSecretMasked}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-[#C29B38]/15 text-[#9A7820] font-mono text-[10px] font-bold">
+                            Not Configured
+                          </span>
+                        )}
+                        {paymentView?.paypalSecretSource === 'database' && (
+                          <button
+                            type="button"
+                            onClick={() => handleClearSecret('paypal_secret')}
+                            className="text-[11px] text-[#A63A2A] hover:underline cursor-pointer"
+                          >
+                            Clear stored secret
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <input
+                      id="paypal-secret"
+                      type="password"
+                      autoComplete="new-password"
+                      value={paypalSecretInput}
+                      onChange={(e) => setPaypalSecretInput(e.target.value)}
+                      placeholder={
+                        paymentView?.hasPaypalSecret
+                          ? `Leave blank to keep ${paymentView.paypalSecretMasked}, or paste new Client Secret...`
+                          : 'Paste PayPal REST App Client Secret...'
+                      }
+                      className="w-full p-2.5 border border-[#E8E2D6] rounded-lg bg-white font-mono focus:outline-none focus:border-[#1B382B]"
+                    />
+                  </div>
+
+                  {/* PayPal Webhook ID (Write-only) */}
+                  <div className="p-4 rounded-xl border border-[#E8E2D6] bg-[#FAF9F6]/70 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label htmlFor="paypal-webhook-id" className="font-bold text-[#18231C] flex items-center gap-1.5">
+                        <Webhook className="w-3.5 h-3.5 text-[#1B382B]" />
+                        PayPal Webhook ID (Signature Verification)
+                      </label>
+                      <div className="flex items-center gap-2">
+                        {paymentView?.hasPaypalWebhookId ? (
+                          <span className="px-2 py-0.5 rounded-full bg-[#2D5A46]/15 text-[#2D5A46] font-mono text-[10px] font-bold">
+                            Configured ({paymentView.paypalWebhookSource}): {paymentView.paypalWebhookIdMasked}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-[#C29B38]/15 text-[#9A7820] font-mono text-[10px] font-bold">
+                            Not Configured
+                          </span>
+                        )}
+                        {paymentView?.paypalWebhookSource === 'database' && (
+                          <button
+                            type="button"
+                            onClick={() => handleClearSecret('paypal_webhook')}
+                            className="text-[11px] text-[#A63A2A] hover:underline cursor-pointer"
+                          >
+                            Clear stored webhook ID
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <input
+                      id="paypal-webhook-id"
+                      type="password"
+                      autoComplete="new-password"
+                      value={paypalWebhookIdInput}
+                      onChange={(e) => setPaypalWebhookIdInput(e.target.value)}
+                      placeholder={
+                        paymentView?.hasPaypalWebhookId
+                          ? `Leave blank to keep ${paymentView.paypalWebhookIdMasked}, or paste new PayPal Webhook ID...`
+                          : 'Paste PayPal Developer Webhook ID...'
+                      }
+                      className="w-full p-2.5 border border-[#E8E2D6] rounded-lg bg-white font-mono focus:outline-none focus:border-[#1B382B]"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                    <button
+                      type="button"
+                      disabled={testingPaypal}
+                      onClick={handleTestPayPalConnection}
+                      className="px-4 py-2.5 border border-[#1B382B] text-[#1B382B] hover:bg-[#1B382B] hover:text-white rounded-xl font-semibold transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${testingPaypal ? 'animate-spin' : ''}`} />
+                      <span>{testingPaypal ? 'Testing PayPal OAuth...' : 'Test PayPal Connection'}</span>
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={paymentSaving}
+                      className="px-5 py-2.5 bg-[#1B382B] hover:bg-[#2D5A46] text-white rounded-xl font-semibold transition-colors shadow-xs cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                    >
+                      <CheckCircle2 className="w-4 h-4 text-[#7FA892]" />
+                      <span>{paymentSaving ? 'Saving...' : 'Save Payment Settings'}</span>
+                    </button>
+                  </div>
+
+                  {paypalTestResult && (
+                    <div
+                      className={`p-3 rounded-xl border font-medium ${
+                        paypalTestResult.ok
+                          ? 'bg-[#F7F9F8] border-[#2D5A46]/30 text-[#2D5A46]'
+                          : 'bg-[#A63A2A]/10 border-[#A63A2A]/30 text-[#A63A2A]'
+                      }`}
+                    >
+                      {paypalTestResult.message}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* PayPal Webhook Endpoint Instructions Card */}
+            <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-4 shadow-xs">
+              <div className="border-b border-[#E8E2D6] pb-3">
+                <h3 className="font-display text-base font-bold text-[#18231C] flex items-center gap-2">
+                  <Webhook className="w-4 h-4 text-[#1B382B]" />
+                  PayPal Webhook Endpoint Configuration
+                </h3>
+                <p className="text-[#526058] mt-0.5">
+                  Register this URL in your PayPal Developer App (Webhooks) and paste the generated Webhook ID above to cryptographically verify captures and refunds.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="font-semibold text-[#18231C]">PayPal Webhook URL</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 p-2.5 rounded-lg bg-[#FAF9F6] border border-[#E8E2D6] font-mono text-[#1B382B] overflow-x-auto">
+                    {typeof window !== 'undefined'
+                      ? `${window.location.origin}/api/paypal/webhook`
+                      : '/api/paypal/webhook'}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url =
+                        typeof window !== 'undefined'
+                          ? `${window.location.origin}/api/paypal/webhook`
+                          : '/api/paypal/webhook';
+                      navigator.clipboard?.writeText(url);
+                      setPaypalWebhookCopied(true);
+                      setTimeout(() => setPaypalWebhookCopied(false), 2500);
+                    }}
+                    className="px-3.5 py-2.5 border border-[#E8E2D6] rounded-lg hover:bg-[#FAF9F6] font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
+                  >
+                    {paypalWebhookCopied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-[#2D5A46]" />
+                        <span className="text-[#2D5A46]">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy URL</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-[#FAF9F6] border border-[#E8E2D6] space-y-1.5">
+                <div className="font-bold text-[#18231C]">Subscribed PayPal Events</div>
+                <ul className="font-mono text-[11px] text-[#2D5A46] space-y-1">
+                  <li>• PAYMENT.CAPTURE.COMPLETED</li>
+                  <li>• PAYMENT.CAPTURE.REFUNDED</li>
+                  <li>• PAYMENT.CAPTURE.DENIED</li>
+                </ul>
+              </div>
+            </div>
           </form>
         </div>
       )}
@@ -4940,18 +5547,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <form
           onSubmit={(e) => {
             e.preventDefault();
+            setSeoError(null);
+            const parsed = validateWithSchema(seoSettingsSchema, seoDraft);
+            if (!parsed.success) {
+              setSeoError(parsed.error);
+              return;
+            }
             onUpdateSettings({
               ...settings,
-              seoTitle: seoDraft.seoTitle.trim(),
-              seoDescription: seoDraft.seoDescription.trim(),
-              seoKeywords: seoDraft.seoKeywords.trim(),
-              ogTitle: seoDraft.ogTitle.trim(),
-              ogDescription: seoDraft.ogDescription.trim(),
-              ogImageUrl: seoDraft.ogImageUrl.trim() || undefined,
-              ogSiteName: seoDraft.ogSiteName.trim() || settings.siteName,
-              twitterCardType: seoDraft.twitterCardType,
-              canonicalUrl: seoDraft.canonicalUrl.trim(),
-              allowSearchIndexing: seoDraft.allowSearchIndexing,
+              seoTitle: parsed.data.seoTitle,
+              seoDescription: parsed.data.seoDescription,
+              seoKeywords: parsed.data.seoKeywords,
+              ogTitle: parsed.data.ogTitle,
+              ogDescription: parsed.data.ogDescription,
+              ogImageUrl: parsed.data.ogImageUrl || undefined,
+              ogSiteName: parsed.data.ogSiteName || settings.siteName,
+              twitterCardType: parsed.data.twitterCardType,
+              canonicalUrl: parsed.data.canonicalUrl || '',
+              allowSearchIndexing: parsed.data.allowSearchIndexing,
             });
             setSeoSavedToast(true);
             setTimeout(() => setSeoSavedToast(false), 3500);
@@ -4977,6 +5590,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </span>
             )}
           </div>
+
+          {seoError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-medium">
+              {seoError}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
             {/* Left Column: Search Engine Meta + Open Graph Editors */}
@@ -5529,6 +6148,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           }}
         />
       )}
+      <CertificatePrintModal
+        isOpen={Boolean(certPreviewModal)}
+        onClose={() => setCertPreviewModal(null)}
+        certificates={certPreviewModal?.certificates || []}
+        settings={settings}
+        orderNumber={certPreviewModal?.orderNumber}
+        initialProductId={certPreviewModal?.initialProductId}
+      />
     </div>
   );
 };

@@ -122,19 +122,45 @@ export interface CustomCommission {
   createdAt: string;
 }
 
+export interface CertificateRecord {
+  certificateNumber: string; // Unique per physical piece e.g. TBJ-2026-8F4A2C
+  orderId: string;
+  orderNumber: string;
+  productId: string;
+  itemIndex: number;
+  title: string;
+  sku: string;
+  material: StoneVariety;
+  designType?: DesignMotif;
+  dimensions?: string;
+  authenticityCode: string;
+  originRiver: string;
+  permitRef?: string;
+  carverName: string;
+  image: string;
+  buyerName: string;
+  buyerEmail: string;
+  issuedAt: string;
+}
+
 export interface OrderItemSnapshot {
   productId: string;
   title: string;
   sku: string;
   priceCents: number;
   material: StoneVariety;
+  designType?: DesignMotif;
+  dimensions?: string;
   authenticityCode: string;
   originRiver: string;
+  permitRef?: string;
+  carverName?: string;
   quantity: number;
   image: string;
+  certificateNumbers?: string[];
 }
 
-export type PaymentMethod = 'STRIPE' | 'CASH_ON_PICKUP' | 'GIFT_CARD';
+export type PaymentMethod = 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP' | 'GIFT_CARD';
 
 export type PaymentStatus = 'UNPAID' | 'PAID' | 'PAY_ON_PICKUP' | 'REFUNDED';
 
@@ -152,9 +178,11 @@ export interface GiftCard {
   recipientName: string;
   recipientEmail: string;
   message: string;
-  purchasePaymentMethod: 'STRIPE' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
+  purchasePaymentMethod: 'STRIPE' | 'PAYPAL' | 'CASH_ON_PICKUP' | 'ADMIN_ISSUED';
   purchaseStatus: GiftCardPurchaseStatus;
   stripePaymentIntentId: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
   isActive: boolean;
   orderNumber: string;
   expiresAt?: string;
@@ -217,6 +245,9 @@ export interface Order {
   pickupNotes?: string;
   orderNotes?: string;
   stripePaymentIntentId: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
+  paypalRefundId?: string;
   stripeFeeCents: number;
   netCents: number;
   status: 'PENDING' | 'PAID' | 'PROCESSING' | 'FULFILLING' | 'SHIPPED' | 'DELIVERED' | 'REFUNDED';
@@ -306,6 +337,9 @@ export interface SiteSettings {
   stripeMode: 'test' | 'live';
   stripePublishableKey?: string;
   stripeStatementDescriptor?: string;
+  paypalEnabled?: boolean;
+  paypalMode?: 'sandbox' | 'live';
+  paypalClientId?: string;
   cashOnPickupEnabled?: boolean;
   cashOnPickupInstructions?: string;
 }
@@ -369,6 +403,9 @@ export interface AdminPaymentSettingsView {
   stripeMode: 'test' | 'live';
   stripePublishableKey: string;
   stripeStatementDescriptor: string;
+  paypalEnabled: boolean;
+  paypalMode: 'sandbox' | 'live';
+  paypalClientId: string;
   cashOnPickupEnabled: boolean;
   cashOnPickupInstructions: string;
   hasSecretKey: boolean;
@@ -377,6 +414,12 @@ export interface AdminPaymentSettingsView {
   webhookSecretMasked: string;
   secretSource: 'database' | 'env' | 'none';
   webhookSource: 'database' | 'env' | 'none';
+  hasPaypalSecret: boolean;
+  paypalSecretMasked: string;
+  paypalSecretSource: 'database' | 'env' | 'none';
+  hasPaypalWebhookId: boolean;
+  paypalWebhookIdMasked: string;
+  paypalWebhookSource: 'database' | 'env' | 'none';
 }
 
 export interface GalleryItem {
