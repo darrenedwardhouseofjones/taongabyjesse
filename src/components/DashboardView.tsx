@@ -108,6 +108,15 @@ interface DashboardViewProps {
   onAddProduct: (newProduct: Product) => Promise<void> | void;
   onUpdateProduct: (updatedProduct: Product) => Promise<void>;
   onDeleteProduct: (productId: string) => Promise<void>;
+  onImportProducts?: (
+    importedProducts: Product[],
+    mode: 'upsert' | 'create_only'
+  ) => Promise<{
+    createdCount: number;
+    updatedCount: number;
+    skippedCount: number;
+    products: Product[];
+  }>;
   onAddGalleryItem: (item: Partial<GalleryItem>) => Promise<void>;
   onDeleteGalleryItem: (id: string) => Promise<void>;
   onAddToCartFromWishlist: (product: Product) => void;
@@ -168,6 +177,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onAddProduct,
   onUpdateProduct,
   onDeleteProduct,
+  onImportProducts,
   onAddGalleryItem,
   onDeleteGalleryItem,
   onAddToCartFromWishlist,
@@ -1904,6 +1914,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 onAddProduct={onAddProduct}
                 onUpdateProduct={onUpdateProduct}
                 onDeleteProduct={onDeleteProduct}
+                onImportProducts={onImportProducts}
                 onAddGalleryItem={onAddGalleryItem}
                 onDeleteGalleryItem={onDeleteGalleryItem}
                 onUpdateCustomPricing={onUpdateCustomPricing}

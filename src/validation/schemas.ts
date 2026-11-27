@@ -531,6 +531,14 @@ export const productPayloadSchema = z.object({
   published: z.boolean().optional().default(true),
 });
 
+export const bulkProductImportSchema = z.object({
+  mode: z.enum(['upsert', 'create_only']).default('upsert'),
+  products: z
+    .array(productPayloadSchema)
+    .min(1, 'CSV import must contain at least 1 valid product row.')
+    .max(500, 'Maximum 500 products per CSV import batch.'),
+});
+
 export const galleryItemSchema = z.object({
   id: z.string().trim().max(120).optional(),
   title: z.string().trim().min(2, 'Gallery piece title is required.').max(160),

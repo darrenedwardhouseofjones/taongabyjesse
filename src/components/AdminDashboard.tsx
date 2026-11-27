@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   TrendingUp,
   DollarSign,
@@ -68,7 +68,14 @@ import {
   StoneVariety,
 } from '../types';
 import { formatNZD, PACKAGE_SIZES } from '../utils/pricing';
-import { downloadOrdersCsv } from '../utils/ordersCsv';
+import { downloadOrdersCsv, downloadOrdersJson } from '../utils/ordersCsv';
+import {
+  downloadCatalogCsv,
+  downloadCatalogJson,
+  downloadCatalogTemplateCsv,
+  parseCatalogImportCsv,
+  type CatalogImportParseResult,
+} from '../utils/catalogCsv';
 import { apiFetch } from '../utils/api';
 import {
   SOCIAL_PLATFORM_OPTIONS,
@@ -143,6 +150,15 @@ interface AdminDashboardProps {
   onAddProduct: (newProduct: Product) => Promise<void> | void;
   onUpdateProduct: (updatedProduct: Product) => Promise<void>;
   onDeleteProduct: (productId: string) => Promise<void>;
+  onImportProducts?: (
+    importedProducts: Product[],
+    mode: 'upsert' | 'create_only'
+  ) => Promise<{
+    createdCount: number;
+    updatedCount: number;
+    skippedCount: number;
+    products: Product[];
+  }>;
   onAddGalleryItem: (item: Partial<GalleryItem>) => Promise<void>;
   onDeleteGalleryItem: (id: string) => Promise<void>;
   onUpdateCustomPricing: (config: CustomPricingConfig) => Promise<void>;
@@ -200,6 +216,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onAddProduct,
   onUpdateProduct,
   onDeleteProduct,
+  onImportProducts,
   onAddGalleryItem,
   onDeleteGalleryItem,
   onUpdateCustomPricing,
@@ -417,8 +434,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [socialSaving, setSocialSaving] = useState(false);
   const [socialError, setSocialError] = useState<string | null>(null);
   const [socialSavedToast, setSocialSavedToast] = useState(false);
+  const [editingSocialId, setEditingSocialId] = useState<string | null>(null);
+  const [editingSocialPlatform, setEditingSocialPlatform] = useState<SocialPlatform>(
+    SocialPlatform.FACEBOOK
+  );
+  const [editingSocialUrl, setEditingSocialUrl] = useState('');
+  const [editingSocialLabel, setEditingSocialLabel] = useState('');
 
-  const persistSocialLinks = async (nextLinks: SocialLink[]) => {
+  const persistSocialLinks = async (nextLinks: SocialLink[]): Promise<boolean> => {
     setSocialError(null);
     setSocialSaving(true);
     try {
@@ -428,10 +451,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
       setSocialSavedToast(true);
       setTimeout(() => setSocialSavedToast(false), 3000);
+      return true;
     } catch (err) {
       setSocialError(
         err instanceof Error ? err.message : 'Failed to save social links to database.'
       );
+      return false;
     } finally {
       setSocialSaving(false);
     }
@@ -457,13 +482,47 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setSocialError('Maximum of 24 social links reached.');
       return;
     }
-    await persistSocialLinks([...existing, parsed.data as SocialLink]);
-    setSocialUrlDraft('');
-    setSocialLabelDraft('');
+    const ok = await persistSocialLinks([...existing, parsed.data as SocialLink]);
+    if (ok) {
+      setSocialUrlDraft('');
+      setSocialLabelDraft('');
+    }
+  };
+
+  const handleStartEditSocial = (link: SocialLink) => {
+    setSocialError(null);
+    setEditingSocialId(link.id);
+    setEditingSocialPlatform(link.platform);
+    setEditingSocialUrl(link.url);
+    setEditingSocialLabel(link.label || '');
+  };
+
+  const handleSaveEditSocial = async (id: string) => {
+    setSocialError(null);
+    const candidate: SocialLink = {
+      id,
+      platform: editingSocialPlatform,
+      url: normalizeSocialUrl(editingSocialUrl),
+      ...(editingSocialLabel.trim() ? { label: editingSocialLabel.trim() } : {}),
+    };
+    const parsed = validateWithSchema(socialLinkSchema, candidate);
+    if (!parsed.success) {
+      setSocialError(parsed.error);
+      return;
+    }
+    const existing = settings.socialLinks || [];
+    const nextLinks = existing.map((item) =>
+      item.id === id ? (parsed.data as SocialLink) : item
+    );
+    const ok = await persistSocialLinks(nextLinks);
+    if (ok) {
+      setEditingSocialId(null);
+    }
   };
 
   const handleRemoveSocialLink = async (id: string) => {
     const existing = settings.socialLinks || [];
+    if (editingSocialId === id) setEditingSocialId(null);
     await persistSocialLinks(existing.filter((item) => item.id !== id));
   };
 
@@ -778,6 +837,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [productActionError, setProductActionError] = useState<string | null>(null);
   const [productSaving, setProductSaving] = useState(false);
 
+  // Catalog CSV Import & Export state
+  const catalogCsvInputRef = useRef<HTMLInputElement | null>(null);
+  const [csvImportPreview, setCsvImportPreview] = useState<{
+    filename: string;
+    result: CatalogImportParseResult;
+  } | null>(null);
+  const [csvImportMode, setCsvImportMode] = useState<'upsert' | 'create_only'>('upsert');
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [catalogTransferNotice, setCatalogTransferNotice] = useState<string | null>(null);
+  const [catalogTransferError, setCatalogTransferError] = useState<string | null>(null);
+
   // Add / Delete Gallery Archive state
   const [galTitle, setGalTitle] = useState('');
   const [galMaterial, setGalMaterial] = useState<StoneVariety>('Kawakawa');
@@ -1053,6 +1123,79 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     downloadOrdersCsv(orders);
   };
 
+  const handleExportOrdersJson = () => {
+    downloadOrdersJson(orders);
+  };
+
+  const handleExportCatalogCsv = () => {
+    const filename = downloadCatalogCsv(products);
+    setCatalogTransferError(null);
+    setCatalogTransferNotice(`Exported ${products.length} catalog pieces to ${filename}.`);
+    setTimeout(() => setCatalogTransferNotice(null), 5000);
+  };
+
+  const handleExportCatalogJson = () => {
+    const filename = downloadCatalogJson(products);
+    setCatalogTransferError(null);
+    setCatalogTransferNotice(`Exported ${products.length} catalog pieces to ${filename}.`);
+    setTimeout(() => setCatalogTransferNotice(null), 5000);
+  };
+
+  const handleDownloadCatalogTemplate = () => {
+    const filename = downloadCatalogTemplateCsv();
+    setCatalogTransferError(null);
+    setCatalogTransferNotice(`Downloaded import template (${filename}).`);
+    setTimeout(() => setCatalogTransferNotice(null), 5000);
+  };
+
+  const handleCatalogCsvFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setCatalogTransferError(null);
+    setCatalogTransferNotice(null);
+
+    if (file.size > 2 * 1024 * 1024) {
+      setCatalogTransferError('CSV file exceeds the 2 MB import limit.');
+      return;
+    }
+    try {
+      const text = await file.text();
+      const result = parseCatalogImportCsv(text, products);
+      setCsvImportPreview({ filename: file.name, result });
+    } catch (err) {
+      setCatalogTransferError(
+        err instanceof Error ? err.message : 'Unable to read the selected CSV file.'
+      );
+    }
+  };
+
+  const handleConfirmCatalogImport = async () => {
+    if (!csvImportPreview || csvImportPreview.result.validProducts.length === 0) return;
+    if (!onImportProducts) {
+      setCatalogTransferError('Batch import handler is not configured.');
+      return;
+    }
+    setCsvImporting(true);
+    setCatalogTransferError(null);
+    try {
+      const res = await onImportProducts(csvImportPreview.result.validProducts, csvImportMode);
+      setCsvImportPreview(null);
+      setCatalogTransferNotice(
+        `Inventory import complete: ${res.createdCount} created, ${res.updatedCount} updated${
+          res.skippedCount > 0 ? `, ${res.skippedCount} existing skipped` : ''
+        }.`
+      );
+      setTimeout(() => setCatalogTransferNotice(null), 7000);
+    } catch (err) {
+      setCatalogTransferError(
+        err instanceof Error ? err.message : 'Failed to import CSV inventory.'
+      );
+    } finally {
+      setCsvImporting(false);
+    }
+  };
+
   return (
     <div className={embeddedSection ? 'space-y-6 font-sans-ui' : 'max-w-7xl mx-auto px-6 py-10 space-y-8 font-sans-ui'}>
       {/* Top Admin Header (shown only when standalone) */}
@@ -1201,18 +1344,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* "Needs Attention" Queue */}
           <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="font-display text-base font-bold text-[#18231C] flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 text-[#C29B38]" />
                 <span>Atelier Action Queue ("Needs Attention")</span>
               </h3>
-              <button
-                onClick={handleExportXeroCsv}
-                className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Export Xero CSV</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportXeroCsv}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Orders CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportOrdersJson}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Orders JSON</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportCatalogCsv}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Catalog CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportCatalogJson}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Catalog JSON</span>
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -1290,14 +1460,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Updating an order’s status (Processing, Shipped, Delivered) automatically emails the customer and logs delivery in SQLite.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={handleExportXeroCsv}
-                className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Export Xero CSV</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportXeroCsv}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export Orders CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportOrdersJson}
+                  className="px-3 py-1.5 border border-[#E8E2D6] text-xs font-semibold rounded-lg hover:bg-[#FAF9F6] flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Export Orders JSON</span>
+                </button>
+              </div>
             </div>
 
             {trackingNotice && (
@@ -3435,15 +3615,176 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* TAB 4: STONE INVENTORY & CATALOGUE */}
       {activeTab === 'catalogue' && (
         <div className="bg-white rounded-2xl border border-[#E8E2D6] p-6 space-y-6">
-          <div className="flex items-center justify-between">
-            <h3 className="font-display text-base font-bold text-[#18231C]">
-              Stone Catalogue & Authenticity Codes ({products.length})
-            </h3>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-display text-base font-bold text-[#18231C]">
+                Stone Catalogue &amp; Authenticity Codes ({products.length})
+              </h3>
+              <p className="text-[11px] text-[#526058]">
+                Export your entire catalog as CSV or JSON, download the CSV inventory template, or bulk-import products with Zod validation.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={handleExportCatalogCsv}
+                className="px-3 py-1.5 border border-[#E8E2D6] rounded-lg font-semibold text-[#18231C] hover:bg-[#FAF9F6] inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export Catalog CSV</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleExportCatalogJson}
+                className="px-3 py-1.5 border border-[#E8E2D6] rounded-lg font-semibold text-[#18231C] hover:bg-[#FAF9F6] inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Export Catalog JSON</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadCatalogTemplate}
+                className="px-3 py-1.5 border border-[#E8E2D6] rounded-lg font-semibold text-[#2D5A46] hover:bg-[#FAF9F6] inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>CSV Template</span>
+              </button>
+              <input
+                ref={catalogCsvInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleCatalogCsvFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => catalogCsvInputRef.current?.click()}
+                className="px-3 py-1.5 bg-[#1B382B] text-white rounded-lg font-semibold hover:bg-[#2D5A46] inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Import Inventory CSV</span>
+              </button>
+            </div>
           </div>
 
-          {productActionError && (
+          {catalogTransferNotice && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{catalogTransferNotice}</span>
+            </div>
+          )}
+
+          {(catalogTransferError || productActionError) && (
             <div className="p-3 rounded-xl bg-[#A63A2A]/10 border border-[#A63A2A]/30 text-[#A63A2A] text-xs font-medium">
-              {productActionError}
+              {catalogTransferError || productActionError}
+            </div>
+          )}
+
+          {csvImportPreview && (
+            <div className="p-4 rounded-xl bg-[#FAF9F6] border border-[#2D5A46]/30 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E8E2D6] pb-2.5">
+                <div>
+                  <div className="font-bold text-[#18231C]">
+                    CSV Import Preview: {csvImportPreview.filename}
+                  </div>
+                  {csvImportPreview.result.fatalError ? (
+                    <div className="text-[#A63A2A] font-medium mt-0.5">
+                      {csvImportPreview.result.fatalError}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-[#526058] mt-0.5">
+                      {csvImportPreview.result.validProducts.length} valid row(s) (
+                      <strong className="text-[#1B382B]">
+                        {csvImportPreview.result.createCount} new
+                      </strong>
+                      ,{' '}
+                      <strong className="text-[#2D5A46]">
+                        {csvImportPreview.result.updateCount} matching SKU/ID updates
+                      </strong>
+                      ){csvImportPreview.result.errorCount > 0 && (
+                        <span className="text-[#A63A2A] font-semibold">
+                          {' '}
+                          · {csvImportPreview.result.errorCount} validation error(s)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={csvImportMode}
+                    onChange={(e) =>
+                      setCsvImportMode(e.target.value as 'upsert' | 'create_only')
+                    }
+                    className="px-2.5 py-1.5 bg-white border border-[#E8E2D6] rounded-lg text-[11px] font-semibold text-[#18231C]"
+                  >
+                    <option value="upsert">Update matching ID/SKU + Add new</option>
+                    <option value="create_only">Add new items only (skip existing)</option>
+                  </select>
+                  <button
+                    type="button"
+                    disabled={
+                      csvImporting ||
+                      Boolean(csvImportPreview.result.fatalError) ||
+                      csvImportPreview.result.validProducts.length === 0 ||
+                      csvImportPreview.result.errorCount > 0
+                    }
+                    onClick={handleConfirmCatalogImport}
+                    className="px-3 py-1.5 bg-[#1B382B] text-white rounded-lg font-semibold hover:bg-[#2D5A46] disabled:opacity-45 cursor-pointer"
+                  >
+                    {csvImporting
+                      ? 'Importing...'
+                      : `Confirm Import (${csvImportPreview.result.validProducts.length})`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCsvImportPreview(null)}
+                    className="px-3 py-1.5 border border-[#E8E2D6] bg-white rounded-lg font-semibold text-[#526058] hover:text-[#18231C] cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+
+              {csvImportPreview.result.rows.length > 0 && (
+                <div className="max-h-48 overflow-y-auto divide-y divide-[#E8E2D6] border border-[#E8E2D6] rounded-lg bg-white">
+                  {csvImportPreview.result.rows.map((row) => (
+                    <div
+                      key={row.rowNumber}
+                      className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-[#526058]">#{row.rowNumber}</span>
+                        <span className="font-semibold text-[#18231C] truncate">
+                          {row.rawTitle || '(Untitled)'}
+                        </span>
+                        {row.rawSku && (
+                          <span className="font-mono text-[10px] text-[#526058] bg-[#FAF9F6] px-1.5 py-0.5 rounded border border-[#E8E2D6]">
+                            {row.rawSku}
+                          </span>
+                        )}
+                      </div>
+                      {row.error ? (
+                        <span className="text-[#A63A2A] font-medium">{row.error}</span>
+                      ) : (
+                        <span
+                          className={`px-2 py-0.5 rounded-full font-semibold ${
+                            row.action === 'update'
+                              ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                              : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          }`}
+                        >
+                          {row.action === 'update'
+                            ? csvImportMode === 'create_only'
+                              ? 'Will Skip (Existing)'
+                              : 'Update Existing'
+                            : 'Create New'}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -4750,73 +5091,140 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {(settings.socialLinks || []).map((link, index) => {
                   const meta = getSocialPlatformMeta(link.platform);
                   const safe = isSafeHttpUrl(link.url);
+                  const isEditing = editingSocialId === link.id;
                   return (
                     <div
                       key={link.id}
-                      className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-white hover:bg-[#FAF9F6] text-xs"
+                      className="px-4 py-3 bg-white hover:bg-[#FAF9F6] text-xs"
                     >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className="w-8 h-8 rounded-lg bg-[#FAF9F6] border border-[#E8E2D6] flex items-center justify-center text-[#1B382B] shrink-0">
-                          <SocialIcon platform={link.platform} className="w-4 h-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="font-bold text-[#18231C] flex items-center gap-2">
-                            <span>{meta.label}</span>
-                            {link.label?.trim() && (
-                              <span className="text-[11px] font-medium text-[#526058]">
-                                ({link.label.trim()})
-                              </span>
-                            )}
-                          </div>
-                          {safe ? (
-                            <a
-                              href={link.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[11px] text-[#2D5A46] hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                      {isEditing ? (
+                        <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                          <select
+                            value={editingSocialPlatform}
+                            onChange={(e) =>
+                              setEditingSocialPlatform(e.target.value as SocialPlatform)
+                            }
+                            aria-label="Edit social platform"
+                            className="md:col-span-3 p-2 bg-white border border-[#E8E2D6] rounded-lg font-medium text-[#18231C]"
+                          >
+                            {SOCIAL_PLATFORM_OPTIONS.map((opt) => (
+                              <option key={opt.platform} value={opt.platform}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            value={editingSocialUrl}
+                            onChange={(e) => setEditingSocialUrl(e.target.value)}
+                            placeholder={getSocialPlatformMeta(editingSocialPlatform).placeholder}
+                            aria-label="Edit social URL"
+                            className="md:col-span-4 p-2 bg-white border border-[#E8E2D6] rounded-lg"
+                          />
+                          <input
+                            type="text"
+                            value={editingSocialLabel}
+                            onChange={(e) => setEditingSocialLabel(e.target.value)}
+                            placeholder="Optional label"
+                            maxLength={80}
+                            aria-label="Edit social label"
+                            className="md:col-span-2 p-2 bg-white border border-[#E8E2D6] rounded-lg"
+                          />
+                          <div className="md:col-span-3 flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              disabled={socialSaving}
+                              onClick={() => handleSaveEditSocial(link.id)}
+                              className="px-3 py-1.5 rounded-lg bg-[#1B382B] text-white font-semibold hover:bg-[#2D5A46] disabled:opacity-50 cursor-pointer"
                             >
-                              <span className="truncate">{link.url}</span>
-                              <ExternalLink className="w-3 h-3 shrink-0" />
-                            </a>
-                          ) : (
-                            <span className="text-[11px] text-red-600 truncate block">
-                              {link.url}
-                            </span>
-                          )}
+                              {socialSaving ? 'Saving...' : 'Save'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={socialSaving}
+                              onClick={() => setEditingSocialId(null)}
+                              className="px-2.5 py-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          disabled={socialSaving || index === 0}
-                          onClick={() => handleMoveSocialLink(index, -1)}
-                          aria-label={`Move ${meta.label} up`}
-                          className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
-                        >
-                          <ArrowUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          disabled={
-                            socialSaving || index === (settings.socialLinks || []).length - 1
-                          }
-                          onClick={() => handleMoveSocialLink(index, 1)}
-                          aria-label={`Move ${meta.label} down`}
-                          className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
-                        >
-                          <ArrowDown className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          disabled={socialSaving}
-                          onClick={() => handleRemoveSocialLink(link.id)}
-                          aria-label={`Remove ${meta.label}`}
-                          className="px-2.5 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50 font-semibold inline-flex items-center gap-1 disabled:opacity-40 cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Remove</span>
-                        </button>
-                      </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            <div className="w-8 h-8 rounded-lg bg-[#FAF9F6] border border-[#E8E2D6] flex items-center justify-center text-[#1B382B] shrink-0">
+                              <SocialIcon platform={link.platform} className="w-4 h-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-bold text-[#18231C] flex items-center gap-2">
+                                <span>{meta.label}</span>
+                                {link.label?.trim() && (
+                                  <span className="text-[11px] font-medium text-[#526058]">
+                                    ({link.label.trim()})
+                                  </span>
+                                )}
+                              </div>
+                              {safe ? (
+                                <a
+                                  href={link.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[11px] text-[#2D5A46] hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                                >
+                                  <span className="truncate">{link.url}</span>
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                </a>
+                              ) : (
+                                <span className="text-[11px] text-red-600 truncate block">
+                                  {link.url}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              disabled={socialSaving || index === 0}
+                              onClick={() => handleMoveSocialLink(index, -1)}
+                              aria-label={`Move ${meta.label} up`}
+                              className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={
+                                socialSaving || index === (settings.socialLinks || []).length - 1
+                              }
+                              onClick={() => handleMoveSocialLink(index, 1)}
+                              aria-label={`Move ${meta.label} down`}
+                              className="p-1.5 rounded-lg border border-[#E8E2D6] text-[#526058] hover:text-[#18231C] hover:border-[#1B382B] disabled:opacity-35 cursor-pointer"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={socialSaving}
+                              onClick={() => handleStartEditSocial(link)}
+                              aria-label={`Edit ${meta.label}`}
+                              className="px-2.5 py-1.5 rounded-lg border border-[#E8E2D6] text-[#1B382B] hover:bg-[#FAF9F6] font-semibold inline-flex items-center gap-1 disabled:opacity-40 cursor-pointer"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>Edit</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={socialSaving}
+                              onClick={() => handleRemoveSocialLink(link.id)}
+                              aria-label={`Remove ${meta.label}`}
+                              className="px-2.5 py-1.5 rounded-lg border border-red-200 text-red-700 hover:bg-red-50 font-semibold inline-flex items-center gap-1 disabled:opacity-40 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Remove</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

@@ -70,6 +70,7 @@ import {
   getUserBySessionToken,
   getUserWithPasswordById,
   getWishlistForUser,
+  importProductsBatch,
   markOrderPaidAtomic,
   normalizeSeoPageKey,
   recordOrderRefund,
@@ -178,6 +179,7 @@ import {
   paymentSettingsSchema,
   paypalCancelOrderSchema,
   paypalCaptureOrderSchema,
+  bulkProductImportSchema,
   productPayloadSchema,
   profileUpdateSchema,
   provenanceLookupRouteQuerySchema,
@@ -2797,6 +2799,20 @@ async function startServer() {
     }
     refreshPublicSitemap();
     res.json({ product: saved });
+  });
+
+  app.post('/api/products/import', validateBody(bulkProductImportSchema), (req, res) => {
+    const user = getAuthenticatedUser(req);
+    if (!user || user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Admin permission required.' });
+    }
+    const { products: importedProducts, mode } = req.body as {
+      products: Product[];
+      mode: 'upsert' | 'create_only';
+    };
+    const result = importProductsBatch(importedProducts, mode);
+    refreshPublicSitemap();
+    res.status(200).json({ ok: true, ...result });
   });
 
   app.delete('/api/products/:id', (req, res) => {

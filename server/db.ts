@@ -468,6 +468,98 @@ export function deleteProduct(productId: string): boolean {
   return res.changes > 0;
 }
 
+export function importProductsBatch(
+  incomingProducts: Product[],
+  mode: 'upsert' | 'create_only' = 'upsert'
+): { createdCount: number; updatedCount: number; skippedCount: number; products: Product[] } {
+  const runTx = db.transaction(
+    (rows: Product[], importMode: 'upsert' | 'create_only') => {
+      const existingRows = getAllProducts();
+      const byId = new Map(existingRows.map((p) => [p.id, p]));
+      const bySku = new Map(
+        existingRows
+          .filter((p) => p.sku && p.sku.trim().length > 0)
+          .map((p) => [p.sku.trim().toLowerCase(), p])
+      );
+
+      let createdCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+      const insertStmt = db.prepare(
+        'INSERT INTO products (id, sort_order, data_json) VALUES (?, ?, ?)'
+      );
+      const updateStmt = db.prepare('UPDATE products SET data_json = ? WHERE id = ?');
+      const nowBase = Date.now();
+
+      rows.forEach((raw, idx) => {
+        const cleanSku = (raw.sku || '').trim();
+        const existingMatch =
+          (raw.id ? byId.get(raw.id) : undefined) ||
+          (cleanSku ? bySku.get(cleanSku.toLowerCase()) : undefined);
+
+        if (existingMatch) {
+          if (importMode === 'create_only') {
+            skippedCount++;
+            return;
+          }
+          const updated: Product = {
+            ...existingMatch,
+            ...raw,
+            id: existingMatch.id,
+            sku: cleanSku || existingMatch.sku,
+            slug:
+              (raw.slug || '').trim() ||
+              existingMatch.slug ||
+              raw.title
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '') ||
+              existingMatch.id,
+          };
+          updateStmt.run(JSON.stringify(updated), existingMatch.id);
+          byId.set(updated.id, updated);
+          if (updated.sku) bySku.set(updated.sku.trim().toLowerCase(), updated);
+          updatedCount++;
+          return;
+        }
+
+        const generatedId =
+          raw.id && !byId.has(raw.id)
+            ? raw.id
+            : `prod-${crypto.randomUUID().slice(0, 8)}`;
+        const generatedSlug =
+          (raw.slug || '').trim() ||
+          raw.title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') ||
+          generatedId;
+        const generatedSku = cleanSku || `SKU-${generatedId.toUpperCase()}`;
+
+        const created: Product = {
+          ...raw,
+          id: generatedId,
+          slug: generatedSlug,
+          sku: generatedSku,
+        };
+        insertStmt.run(created.id, -(nowBase + idx), JSON.stringify(created));
+        byId.set(created.id, created);
+        bySku.set(created.sku.trim().toLowerCase(), created);
+        createdCount++;
+      });
+
+      return {
+        createdCount,
+        updatedCount,
+        skippedCount,
+        products: getAllProducts(),
+      };
+    }
+  );
+
+  return runTx(incomingProducts, mode);
+}
+
 // --- Gallery Archive Helpers ---
 
 export function getGalleryItems(): GalleryItem[] {

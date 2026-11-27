@@ -1,7 +1,11 @@
 import type { Order } from '../types';
 
-function escapeCsvCell(value: unknown): string {
-  const str = String(value ?? '');
+export function escapeCsvCell(value: unknown): string {
+  let str = String(value ?? '');
+  // Guard spreadsheets against formula injection on non-numeric strings
+  if (str.length > 0 && !/^-?\d+(\.\d+)?$/.test(str) && /^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
   if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -90,12 +94,21 @@ export function buildOrdersCsv(orders: Order[]): string {
   return [headers.map(escapeCsvCell).join(','), ...rows.map((r) => r.join(','))].join('\r\n');
 }
 
-export function downloadOrdersCsv(orders: Order[], filenamePrefix = 'Pounamu_Atelier_Orders'): string {
-  const csv = buildOrdersCsv(orders);
-  const dateStamp = new Date().toISOString().split('T')[0];
-  const filename = `${filenamePrefix}_${dateStamp}.csv`;
+export function buildOrdersJson(orders: Order[]): string {
+  return JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      currency: 'NZD',
+      recordCount: orders.length,
+      orders,
+    },
+    null,
+    2
+  );
+}
 
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+function triggerFileDownload(content: string, mimeType: string, filename: string): string {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.setAttribute('href', url);
@@ -104,6 +117,25 @@ export function downloadOrdersCsv(orders: Order[], filenamePrefix = 'Pounamu_Ate
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
-
   return filename;
+}
+
+export function downloadOrdersCsv(orders: Order[], filenamePrefix = 'Pounamu_Atelier_Orders'): string {
+  const csv = buildOrdersCsv(orders);
+  const dateStamp = new Date().toISOString().split('T')[0];
+  return triggerFileDownload(
+    '\uFEFF' + csv,
+    'text/csv;charset=utf-8;',
+    `${filenamePrefix}_${dateStamp}.csv`
+  );
+}
+
+export function downloadOrdersJson(orders: Order[], filenamePrefix = 'Pounamu_Atelier_Orders'): string {
+  const json = buildOrdersJson(orders);
+  const dateStamp = new Date().toISOString().split('T')[0];
+  return triggerFileDownload(
+    json,
+    'application/json;charset=utf-8;',
+    `${filenamePrefix}_${dateStamp}.json`
+  );
 }

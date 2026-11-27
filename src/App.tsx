@@ -1069,6 +1069,28 @@ export default function App() {
     setCartItems((prev) => prev.filter((item) => item.product.id !== productId));
   };
 
+  const handleImportProducts = async (
+    importedProducts: Product[],
+    mode: 'upsert' | 'create_only'
+  ): Promise<{
+    createdCount: number;
+    updatedCount: number;
+    skippedCount: number;
+    products: Product[];
+  }> => {
+    const res = await apiFetch<{
+      createdCount: number;
+      updatedCount: number;
+      skippedCount: number;
+      products: Product[];
+    }>('/api/products/import', {
+      method: 'POST',
+      body: JSON.stringify({ products: importedProducts, mode }),
+    });
+    setProducts(res.products);
+    return res;
+  };
+
   // Admin Custom Configurator Pricing
   const handleUpdateCustomPricing = async (config: CustomPricingConfig) => {
     const res = await apiFetch<{ customPricing: CustomPricingConfig }>('/api/custom-pricing', {
@@ -1080,13 +1102,19 @@ export default function App() {
 
   // Admin Site Settings
   const handleUpdateSettings = async (nextSettings: SiteSettings): Promise<SiteSettings> => {
+    const previousSettings = settings;
     setSettings(nextSettings);
-    const res = await apiFetch<{ settings: SiteSettings }>('/api/settings', {
-      method: 'PUT',
-      body: JSON.stringify(nextSettings),
-    });
-    setSettings(res.settings);
-    return res.settings;
+    try {
+      const res = await apiFetch<{ settings: SiteSettings }>('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify(nextSettings),
+      });
+      setSettings(res.settings);
+      return res.settings;
+    } catch (err) {
+      setSettings(previousSettings);
+      throw err;
+    }
   };
 
   const handlePageSeoChange = (
@@ -1464,6 +1492,7 @@ export default function App() {
             onAddProduct={handleAddProduct}
             onUpdateProduct={handleUpdateProduct}
             onDeleteProduct={handleDeleteProduct}
+            onImportProducts={handleImportProducts}
             onAddGalleryItem={handleAddGalleryItem}
             onDeleteGalleryItem={handleDeleteGalleryItem}
             onAddToCartFromWishlist={handleAddToCart}
